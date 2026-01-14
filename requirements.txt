@@ -1,4 +1,6 @@
-torch>=2.2
+#torch>=2.2
+torch>=2.6,<3.0
+
 accelerate
 appdirs
 loralib
@@ -17,5 +19,11 @@ matplotlib
 gradio
 chardet
 openai
-typing-extensions==4.8.0
+
+#typing-extensions==4.8.0
+typing-extensions>=4.10.0
+
 tabulate
+matplotlib
+scikit-learn
+wandb
