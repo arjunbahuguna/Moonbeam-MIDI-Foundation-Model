@@ -27,4 +27,3 @@ tabulate
 matplotlib
 scikit-learn
 wandb
-mido
