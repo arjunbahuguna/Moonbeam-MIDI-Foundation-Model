@@ -1,6 +1,25 @@
 import os
 import matplotlib.pyplot as plt
-from llama_recipes.datasets.music_tokenizer import MusicTokenizer
+# from llama_recipes.datasets.music_tokenizer import MusicTokenizer
+try:
+    from llama_recipes.datasets.music_tokenizer import MusicTokenizer
+except ModuleNotFoundError:
+    import sys, importlib
+    repo_root = os.path.abspath(os.path.dirname(__file__))
+    src_path = os.path.join(repo_root, "src")
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+    try:
+        MusicTokenizer = importlib.import_module("llama_recipes.datasets.music_tokenizer").MusicTokenizer
+    except Exception:
+        raise RuntimeError(
+            "Cannot import 'llama_recipes'. Either run with the repo src on PYTHONPATH:\n\n"
+            "  export PYTHONPATH=\"$PWD/src:$PYTHONPATH\"\n"
+            "  python data_preprocess.py ...\n\n"
+            "or install the package (from project root):\n\n"
+            "  pip install -e src\n"
+        )
+    
 import traceback
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
