@@ -13,8 +13,17 @@ src/llama_recipes/transformers_minimal/src/transformers/models/encoder_decoder/_
 src/llama_recipes/transformers_minimal/src/transformers/quantizers/__pycache__/
 src/llama_recipes/transformers_minimal/src/transformers/models/auto/__pycache__/
 
+# Environments and python cache
+moonbeam_test/
+__pycache__/
+*.pyc
+
+# Datasets
 datasets/
 processed_datasets/
-moonbeam_test/
-models/*
+
+# Models
+models/
+
+# Wandb logs
 wandb/
