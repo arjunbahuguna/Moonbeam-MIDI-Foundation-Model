@@ -140,7 +140,7 @@ tomlkit==0.13.3
 torch==2.9.1
 tqdm==4.67.1
 traitlets==5.14.3
-transformers @ file:///home/arjbah/Desktop/Coursework/SYM/Moonbeam-MIDI-Foundation-Model/src/llama_recipes/transformers_minimal
+transformers>=0.0.0
 triton==3.5.1
 typer==0.21.1
 typer-slim==0.21.1
