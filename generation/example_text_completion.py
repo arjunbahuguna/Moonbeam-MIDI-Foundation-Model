@@ -2,9 +2,7 @@
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 from typing import List
-
 import fire
-
 from llama import Llama
 
 

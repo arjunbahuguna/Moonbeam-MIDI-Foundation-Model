@@ -32,7 +32,7 @@ import argparse
 import csv
 from sklearn.model_selection import train_test_split
 import pandas as pd
-num_cores = multiprocessing.cpu_count()
+num_cores = 1 #multiprocessing.cpu_count() #EDITED
 
 def chunk_compounds(compounds, threshold=1024):
     """chunk the compounds such that long silences in between are not treated as long timeshifts"""
@@ -142,6 +142,7 @@ def process_midi_file_safe_v3(midi_file, split, label, onset_vocab_size, dur_voc
             log.write(traceback.format_exc())
             log.write('\n')
         return [None]
+    
 
 def detect_large_timeshifts_and_durations(compounds, onset_vocab_size, dur_vocab_size):
     #check if file contains large timeshits and durations

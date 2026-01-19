@@ -1,7 +1,25 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
 
-import os
+import os, sys
+
+# # ensure local transformers_minimal package (inner "src/transformers") takes precedence
+# repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# src_root = os.path.join(repo_root, "src")
+# local_transformers_root = os.path.join(src_root, "llama_recipes", "transformers_minimal")
+# local_transformers_src = os.path.join(local_transformers_root, "src")  # <- the actual transformers package lives here
+
+# # put local transformers first, then repo src
+# candidates = [local_transformers_src, src_root]
+# for p in candidates:
+#     if os.path.isdir(p) and p not in sys.path:
+#         sys.path.insert(0, p)
+
+# # If transformers / tokenizers were already imported from site-packages, remove them
+# for m in list(sys.modules):
+#     if m == "transformers" or m.startswith("transformers.") or m == "tokenizers" or m.startswith("tokenizers."):
+#         del sys.modules[m]
+
 import json
 import dataclasses
 import fire
@@ -19,7 +37,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import StepLR
 from transformers import (
     AutoTokenizer,
-    LlamaForCausalLM,
+    LlamaForCausalLM, 
     LlamaForSequenceClassification,
     LlamaConfig,
 )
@@ -93,7 +111,7 @@ def setup_wandb(train_config, fsdp_config, llama_config, **kwargs):
 def main(**kwargs):
     # Update the configuration for the training and sharding process
     train_config, fsdp_config, ddp_config = TRAIN_CONFIG(), FSDP_CONFIG(), DDP_CONFIG()
-    model_config_path = "src/llama_recipes/configs/player_classification_config.json"
+    model_config_path = "/home/arjbah/Desktop/Coursework/SYM/Moonbeam-MIDI-Foundation-Model/src/llama_recipes/configs/player_classification_config.json"
     update_config((train_config, fsdp_config, ddp_config), **kwargs)
     print("updated training config", train_config)
     # Set the seeds for reproducibility

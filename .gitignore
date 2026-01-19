@@ -1,3 +1,4 @@
+src/llama_recipes_local.egg-info
 src/llama_recipes/datasets/__pycache__/
 src/llama_recipes/data/__pycache__/
 src/llama_recipes/model/modeling_musicllama.py
@@ -17,9 +18,12 @@ src/llama_recipes/transformers_minimal/src/transformers/models/auto/__pycache__/
 moonbeam_test/
 __pycache__/
 *.pyc
+pyproject.toml
 
 # Datasets
-datasets/
+datasets/classification/emopia2.2/
+datasets/classification/pianist8/
+datasets/classification/pijama30/
 processed_datasets/
 
 # Models
@@ -27,3 +31,6 @@ models/
 
 # Wandb logs
 wandb/
+
+#Misc
+=4.30

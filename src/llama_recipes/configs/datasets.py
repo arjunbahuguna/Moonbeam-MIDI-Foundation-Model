@@ -54,8 +54,8 @@ class player_classification_dataset: #Pijama, individual_eval=False, seq_dur = 1
     dataset: str = "player_classification_dataset"
     train_split: str = "train"
     test_split: str = "test"
-    data_dir: str = "/home/arjbah/Desktop/Coursework/SYM/Moonbeam-MIDI-Foundation-Model/processed_datasets"
-    csv_file: str = "/home/arjbah/Desktop/Coursework/SYM/Moonbeam-MIDI-Foundation-Model/datasets/classification/gpm30/gpm30_finetune.csv"
+    data_dir: str = "/home/arjbah/Desktop/Coursework/SYM/Moonbeam-MIDI-Foundation-Model/processed_datasets/classification/gpm30/" #HARDCODED
+    csv_file: str = "/home/arjbah/Desktop/Coursework/SYM/Moonbeam-MIDI-Foundation-Model/processed_datasets/classification/gpm30/train_test_split.csv" #HARDCODED
     seq_len: Optional[int] = 1200 #fixed sequence length during training, if seq_len and seq_dur are both None, concat all events in midi 
     seq_dur: Optional[str] = None #fixed sequence duration during training, if seq_len and seq_dur are both None, concat all events in midi 
     non_overlap_ratio: float = 0.25 #allowed range (0, 1]

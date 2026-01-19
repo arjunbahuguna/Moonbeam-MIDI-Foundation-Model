@@ -4,6 +4,9 @@
 # For dataset details visit: https://huggingface.co/datasets/jfleg
 # For download and preparation see: recipes/ft_datasets/grammar_dataset/grammar_dataset_process.ipynb
 
+# for ensuring huggingface datasets, and not local datasets
+#import sys
+#sys.path.insert(1, "/home/arjbah/Desktop/Coursework/SYM/Moonbeam-MIDI-Foundation-Model/moonbeam_test/lib/python3.12/site-packages/datasets")
 
 from datasets import load_dataset
 from pathlib import Path
