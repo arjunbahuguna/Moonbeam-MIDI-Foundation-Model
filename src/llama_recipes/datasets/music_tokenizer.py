@@ -15,14 +15,86 @@ import pandas as pd
 import os
 
 def pitch_to_octave_pitch_class(pitch):
+    """Standard 12TET: split MIDI note (int) into octave and pitch class."""
     return pitch//12, pitch%12
 
 def octave_pitch_class_to_pitch(octave, pitch_class):
+    """Standard 12TET: reconstruct MIDI note from octave and pitch class."""
     return int(octave*12+pitch_class)
 
 
+def pitch_to_octave_pitch_class_microtonal(canonical_pitch_semitones):
+    """Microtonal: split a canonical pitch (float, in semitones) into octave
+    and pitch-class-in-cents (int, 0-1199).
+
+    Args:
+        canonical_pitch_semitones (float): The canonical pitch in semitone
+            units, e.g. 60.0 for middle C, 60.5 for a quarter-tone above.
+
+    Returns:
+        (int, int): (octave, pitch_class_cents) where
+            octave = floor(canonical_pitch / 12)
+            pitch_class_cents = round((canonical_pitch % 12) * 100)
+            clamped to [0, 1199].
+    """
+    octave = int(canonical_pitch_semitones // 12)
+    pitch_class_cents = int(round((canonical_pitch_semitones % 12) * 100))
+    # Clamp to valid range (handles floating-point edge cases)
+    pitch_class_cents = max(0, min(1199, pitch_class_cents))
+    return octave, pitch_class_cents
+
+
+def octave_pitch_class_to_pitch_microtonal(octave, pitch_class_cents):
+    """Microtonal: reconstruct canonical pitch (float, in semitones) from
+    octave and pitch-class-in-cents.
+
+    Args:
+        octave (int): The octave number.
+        pitch_class_cents (int): Pitch class in cents (0-1199).
+
+    Returns:
+        float: The canonical pitch in semitone units.
+    """
+    return octave * 12.0 + pitch_class_cents / 100.0
+
+
+def pitchbend_to_semitones(pitchbend_value, sensitivity=2.0):
+    """Convert a raw MIDI pitchbend value to semitone offset.
+
+    Args:
+        pitchbend_value (int): Raw pitchbend value in [-8192, 8191].
+        sensitivity (float): Pitchbend range in semitones (default ±2).
+
+    Returns:
+        float: Pitch offset in semitones.
+    """
+    return (pitchbend_value / 8192.0) * sensitivity
+
+
+def canonical_pitch_to_midi_and_pitchbend(canonical_pitch_semitones, sensitivity=2.0):
+    """Convert a canonical pitch (float semitones) back to the nearest MIDI
+    note number and a pitchbend value suitable for MIDI output.
+
+    Args:
+        canonical_pitch_semitones (float): Pitch in semitone units.
+        sensitivity (float): Pitchbend range in semitones.
+
+    Returns:
+        (int, int): (midi_note, pitchbend) where midi_note is 0-127 and
+            pitchbend is in [-8192, 8191].
+    """
+    midi_note = int(round(canonical_pitch_semitones))
+    midi_note = max(0, min(127, midi_note))
+    residual_semitones = canonical_pitch_semitones - midi_note
+    pitchbend = int(round((residual_semitones / sensitivity) * 8192))
+    pitchbend = max(-8192, min(8191, pitchbend))
+    return midi_note, pitchbend
+
+
 class MusicTokenizer():
-    def __init__(self, timeshift_vocab_size = 21, dur_vocab_size = 1001, octave_vocab_size = 9, pitch_class_vocab_size = 12, instrument_vocab_size = 128, velocity_vocab_size = 129, sos_token = -1, eos_token = -2, pad_token = -3):
+    def __init__(self, timeshift_vocab_size = 21, dur_vocab_size = 1001, octave_vocab_size = 9, pitch_class_vocab_size = 12, instrument_vocab_size = 128, velocity_vocab_size = 129, sos_token = -1, eos_token = -2, pad_token = -3, microtonal = False, pitchbend_sensitivity = 2.0):
+        self.microtonal = microtonal
+        self.pitchbend_sensitivity = pitchbend_sensitivity
         self.timeshift_vocab_size = timeshift_vocab_size
         self.dur_vocab_size = dur_vocab_size
         self.octave_vocab_size = octave_vocab_size
@@ -256,13 +328,16 @@ class MusicTokenizer():
 
         return binary
 
-    @staticmethod
-    def midi_to_compound(midifile,TIME_RESOLUTION=100, debug=False):
+    def midi_to_compound(self, midifile, TIME_RESOLUTION=100, debug=False):
 
         """
         modified from: https://github.com/jthickstun/anticipation/blob/main/anticipation/convert.py#L128 
         midifile: a midi file path or a mido object
-        output: a compound list, each item contains: [onset, duration, pitch, instrument, velocity]
+        output: a compound list, each item contains: [onset, duration, octave, pitch_class, instrument, velocity]
+
+        When self.microtonal is True, pitchwheel messages are tracked per channel
+        and used to compute a canonical pitch (float semitones) from which octave
+        and pitch_class_cents (0-1199) are derived.
         """
 
         if type(midifile) == str:
@@ -270,12 +345,16 @@ class MusicTokenizer():
         else:
             midi = midifile
 
-        tokens = [] #output contains tuples of (onset, duration, pitch, instr, velocity)
+        tokens = [] #output contains tuples of (onset, duration, octave, pitch_class, instr, velocity)
         note_idx = 0
         open_notes = defaultdict(list)
 
+        # Track filtered note-0 rest markers (SymbTr silence convention)
+        filtered_note0 = []  # list of dicts with details of each skipped note
+
         time = 0
         instruments = defaultdict(int) # default to code 0 = piano
+        pitchbend_state = defaultdict(int) # per-channel pitchbend value (microtonal)
         tempo = 500000 # default tempo: 500000 microseconds per beat = 0.5 seconds
         for message in midi:
             time += message.time
@@ -286,17 +365,41 @@ class MusicTokenizer():
             #messages: program_change, note_on, note_off
             if message.type == 'program_change':
                 instruments[message.channel] = message.program #assign an instrument name to that channel
+            elif message.type == 'pitchwheel':
+                # Always track pitchbend state; only used when microtonal=True
+                pitchbend_state[message.channel] = message.pitch
             elif message.type in ['note_on', 'note_off']:
                 # special case: channel 9 is drums!
                 instr = 128 if message.channel == 9 else instruments[message.channel] #if drum--> instru = 128; else instrument in the program change message
                 if message.type == 'note_on' and message.velocity > 0: # onset
+                    # Filter out MIDI note 0: treated as a rest/silence marker
+                    # (common in SymbTr Turkish Makam datasets).
+                    if message.note == 0:
+                        filtered_note0.append({
+                            'time': time,
+                            'time_ticks': round(TIME_RESOLUTION * time),
+                            'channel': message.channel,
+                            'velocity': message.velocity,
+                            'pitchbend': pitchbend_state[message.channel],
+                            'instrument': instr,
+                        })
+                        continue
+
                     # time quantization --> convert to binary
                     time_in_ticks = round(TIME_RESOLUTION*time)
-                    # time_in_ticks_binary = decimal_to_binary(time_in_ticks, bits = onset_bits)
-                    # pitch--> octave, pitch_class
-                    octave, pitch_class = pitch_to_octave_pitch_class(message.note)
 
-                    # tokens.append([time_in_ticks, -1, [octave, pitch_class], instr, message.velocity]) #not stackable! 
+                    if self.microtonal:
+                        # Compute canonical pitch from MIDI note + current pitchbend
+                        bend_semitones = pitchbend_to_semitones(
+                            pitchbend_state[message.channel],
+                            self.pitchbend_sensitivity
+                        )
+                        canonical_pitch = message.note + bend_semitones
+                        octave, pitch_class = pitch_to_octave_pitch_class_microtonal(canonical_pitch)
+                    else:
+                        # Standard 12TET path (unchanged)
+                        octave, pitch_class = pitch_to_octave_pitch_class(message.note)
+
                     tokens.append([time_in_ticks, -1, octave, pitch_class, instr, message.velocity]) #stackable! 
                     open_notes[(instr,message.note,message.channel)].append((note_idx, time))
                     note_idx += 1
@@ -316,7 +419,7 @@ class MusicTokenizer():
                 tempo = message.tempo
             elif message.type == 'time_signature':
                 pass # we use real time
-            elif message.type in ['aftertouch', 'polytouch', 'pitchwheel', 'sequencer_specific']:
+            elif message.type in ['aftertouch', 'polytouch', 'sequencer_specific']:
                 pass # we don't attempt to model these
             elif message.type == 'control_change':
                 pass # this includes pedal and per-track volume: ignore for now
@@ -345,13 +448,34 @@ class MusicTokenizer():
             print(f'WARNING: {unclosed_count} unclosed notes')
             print('  ', midifile) #TODO: sort based on onset and pitch?
 
+        # Log filtered note-0 rest markers
+        if filtered_note0:
+            fname = midifile if isinstance(midifile, str) else '<mido.MidiFile object>'
+            import logging
+            logger = logging.getLogger('MusicTokenizer')
+            logger.warning(
+                f'Filtered {len(filtered_note0)} note-0 rest marker(s) from {fname}. '
+                f'Details: {filtered_note0}'
+            )
+            if debug:
+                print(f'NOTE-0 FILTER: {len(filtered_note0)} rest marker(s) removed from {fname}')
+                for entry in filtered_note0:
+                    print(f'  time={entry["time"]:.4f}s (tick={entry["time_ticks"]}), '
+                          f'ch={entry["channel"]}, vel={entry["velocity"]}, '
+                          f'pitchbend={entry["pitchbend"]}, instr={entry["instrument"]}')
+
         return tokens
 
-    @staticmethod
-    def compound_to_midi(tokens, TIME_RESOLUTION = 100, debug=False):
-        #TODO: double check and add doc string
+    def compound_to_midi(self, tokens, TIME_RESOLUTION = 100, debug=False):
         """
+        Convert compound tokens back to a MIDI file.
+
         tokens: npy array with shape (len, 6)
+               [time_in_ticks, duration, octave, pitch_class, instrument, velocity]
+
+        When self.microtonal is True, pitch_class is in cents (0-1199) and the
+        output MIDI will include pitchbend messages to reproduce microtonal
+        pitches accurately.
         """
         mid = mido.MidiFile()
         mid.ticks_per_beat = TIME_RESOLUTION // 2 # 2 beats/second at quarter=120
@@ -360,19 +484,29 @@ class MusicTokenizer():
 
         for _, (row) in enumerate(tokens):
             time_in_ticks,duration,octave, pitch ,instrument,velocity = row
-            note = octave_pitch_class_to_pitch(octave, pitch)
-            time_index[(time_in_ticks,0)].append((note, instrument, velocity)) # 0 = onset
-            time_index[(time_in_ticks+duration,1)].append((note, instrument, velocity)) # 1 = offset
-        track_idx = {} # maps instrument to (track number, current time)
+            if self.microtonal:
+                # Reconstruct canonical pitch in semitones, then split to
+                # nearest MIDI note + pitchbend for output
+                canonical_semitones = octave_pitch_class_to_pitch_microtonal(octave, pitch)
+                midi_note, pitchbend = canonical_pitch_to_midi_and_pitchbend(
+                    canonical_semitones, self.pitchbend_sensitivity
+                )
+            else:
+                midi_note = octave_pitch_class_to_pitch(octave, pitch)
+                pitchbend = None
+            time_index[(time_in_ticks,0)].append((midi_note, instrument, velocity, pitchbend)) # 0 = onset
+            time_index[(time_in_ticks+duration,1)].append((midi_note, instrument, velocity, pitchbend)) # 1 = offset
+        track_idx = {} # maps instrument to (track number, current time, current pitchbend)
         num_tracks = 0
         for time_in_ticks, event_type in sorted(time_index.keys()):
-            for (note, instrument, velocity) in time_index[(time_in_ticks, event_type)]:
+            for (note, instrument, velocity, pitchbend) in time_index[(time_in_ticks, event_type)]:
                 if event_type == 0: # onset
                     try:
-                        track, previous_time, idx = track_idx[instrument]
+                        track, previous_time, idx, _prev_bend = track_idx[instrument]
                     except KeyError:
                         idx = num_tracks
                         previous_time = 0
+                        _prev_bend = 0
                         track = mido.MidiTrack()
                         mid.tracks.append(track)
                         if instrument == 128: # drums always go on channel 9
@@ -385,13 +519,21 @@ class MusicTokenizer():
                         if num_tracks == 9:
                             num_tracks += 1 # skip the drums track
 
+                    # Insert pitchbend message before note_on if microtonal
+                    if pitchbend is not None and pitchbend != _prev_bend:
+                        track.append(mido.Message(
+                            'pitchwheel', channel=idx, pitch=pitchbend,
+                            time=time_in_ticks-previous_time))
+                        previous_time = time_in_ticks  # delta consumed by pitchwheel
+                        _prev_bend = pitchbend
+
                     track.append(mido.Message(
                         'note_on', note=note, channel=idx, velocity=velocity,
                         time=time_in_ticks-previous_time))
-                    track_idx[instrument] = (track, time_in_ticks, idx)
+                    track_idx[instrument] = (track, time_in_ticks, idx, _prev_bend)
                 else: # offset
                     try:
-                        track, previous_time, idx = track_idx[instrument]
+                        track, previous_time, idx, _prev_bend = track_idx[instrument]
                     except KeyError:
                         # shouldn't happen because we should have a corresponding onset
                         if debug:
@@ -402,7 +544,7 @@ class MusicTokenizer():
                     track.append(mido.Message(
                         'note_off', note=note, channel=idx,
                         time=time_in_ticks-previous_time))
-                    track_idx[instrument] = (track, time_in_ticks, idx)
+                    track_idx[instrument] = (track, time_in_ticks, idx, _prev_bend)
 
         return mid
 

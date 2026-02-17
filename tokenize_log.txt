@@ -1,0 +1,14 @@
+================================================================================
+TOKENIZATION LOG
+Dataset: /home/arjbah/Desktop/Coursework/SYM/EDA/data/symbtr_midi_v3
+Total files: 3000
+Date: 2026-02-17 23:58:58
+Elapsed: 26.5s
+================================================================================
+
+Successfully tokenized: 3000/3000
+Errors:                 0/3000
+Total notes extracted:  1163006
+Note-0 rest markers filtered: 1268 (in 1125 files)
+
+No errors encountered.

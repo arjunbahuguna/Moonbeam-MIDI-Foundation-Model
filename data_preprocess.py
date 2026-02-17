@@ -255,9 +255,11 @@ if __name__ == '__main__':
         pitch_class_vocab_size = data.get("pitch_class_vocab_size", None)
         instrument_vocab_size = data.get("instrument_vocab_size", None)
         velocity_vocab_size = data.get("velocity_vocab_size", None)
+        microtonal = data.get("microtonal", False)
+        pitchbend_sensitivity = data.get("pitchbend_sensitivity", 2.0)
         assert onset_vocab_size and dur_vocab_size
-    print(f"processing using {num_cores} cpus. tokenizer config: max timeshift allowed: {onset_vocab_size-3}, max duration allowed: {dur_vocab_size-3}")
-    tokenizer = MusicTokenizer(timeshift_vocab_size = onset_vocab_size, dur_vocab_size = dur_vocab_size, octave_vocab_size = octave_vocab_size, pitch_class_vocab_size = pitch_class_vocab_size, instrument_vocab_size = instrument_vocab_size, velocity_vocab_size = velocity_vocab_size)  
+    print(f"processing using {num_cores} cpus. tokenizer config: max timeshift allowed: {onset_vocab_size-3}, max duration allowed: {dur_vocab_size-3}, microtonal: {microtonal}, pitchbend_sensitivity: {pitchbend_sensitivity}")
+    tokenizer = MusicTokenizer(timeshift_vocab_size = onset_vocab_size, dur_vocab_size = dur_vocab_size, octave_vocab_size = octave_vocab_size, pitch_class_vocab_size = pitch_class_vocab_size, instrument_vocab_size = instrument_vocab_size, velocity_vocab_size = velocity_vocab_size, microtonal = microtonal, pitchbend_sensitivity = pitchbend_sensitivity)  
     
     #process all midi files
     with ProcessPoolExecutor(max_workers=num_cores) as executor:
