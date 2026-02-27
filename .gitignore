@@ -41,3 +41,7 @@ sys
 /datasets/classification/gpm30
 /datasets/classification
 /datasets/classification
+*.xml
+*.pyc
+*.iml
+*.pyc

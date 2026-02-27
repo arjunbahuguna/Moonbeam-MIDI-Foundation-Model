@@ -1,25 +1,8 @@
 import os
 import matplotlib.pyplot as plt
-# from llama_recipes.datasets.music_tokenizer import MusicTokenizer
-try:
-    from llama_recipes.datasets.music_tokenizer import MusicTokenizer
-except ModuleNotFoundError:
-    import sys, importlib
-    repo_root = os.path.abspath(os.path.dirname(__file__))
-    src_path = os.path.join(repo_root, "src")
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-    try:
-        MusicTokenizer = importlib.import_module("llama_recipes.datasets.music_tokenizer").MusicTokenizer
-    except Exception:
-        raise RuntimeError(
-            "Cannot import 'llama_recipes'. Either run with the repo src on PYTHONPATH:\n\n"
-            "  export PYTHONPATH=\"$PWD/src:$PYTHONPATH\"\n"
-            "  python data_preprocess.py ...\n\n"
-            "or install the package (from project root):\n\n"
-            "  pip install -e src\n"
-        )
-    
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+from llama_recipes.datasets.music_tokenizer import MusicTokenizer
 import traceback
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -32,7 +15,7 @@ import argparse
 import csv
 from sklearn.model_selection import train_test_split
 import pandas as pd
-num_cores = 1 #multiprocessing.cpu_count() #EDITED
+num_cores = multiprocessing.cpu_count()
 
 def chunk_compounds(compounds, threshold=1024):
     """chunk the compounds such that long silences in between are not treated as long timeshifts"""

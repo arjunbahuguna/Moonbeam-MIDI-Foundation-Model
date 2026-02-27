@@ -130,8 +130,8 @@ class MusicTokenizer():
         self.timeshift_dict = {i: i+self.sos_out_vocab_size for i in range(self.timeshift_vocab_size)}
         self.duration_dict = {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size for i in range(self.dur_vocab_size)} #linear scale
         self.octave_dict = {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size+self.dur_vocab_size for i in range(self.octave_vocab_size)}
-        
-        self.pitch_dict = {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size+self.dur_vocab_size+self.octave_vocab_size for i in range(self.pitch_class_vocab_size)}
+        self.pitch_dict_base = self.sos_out_vocab_size+self.timeshift_vocab_size+self.dur_vocab_size+self.octave_vocab_size
+
         self.instrument_dict= {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size+self.dur_vocab_size+self.octave_vocab_size+self.pitch_class_vocab_size for i in range(self.instrument_vocab_size)}
         self.velocity_dict = {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size+self.dur_vocab_size+self.octave_vocab_size+self.pitch_class_vocab_size + self.instrument_vocab_size for i in range(self.velocity_vocab_size)}
         print(f"self.sos_out_dict:{self.sos_out_dict}, self.timeshift_dict:{self.timeshift_dict}, self.duration_dict:{self.duration_dict},self.octave_dict:{self.octave_dict}, self.pitch_dict:{self.pitch_dict}, self.instrument_dict:{self.instrument_dict} self.velocity_dict:{self.velocity_dict}")
@@ -140,7 +140,6 @@ class MusicTokenizer():
         self.timeshift_dict_decode = {v: k for k, v in self.timeshift_dict.items()}
         self.duration_dict_decode = {v: k for k, v in self.duration_dict.items()}
         self.octave_dict_decode = {v: k for k, v in self.octave_dict.items()}
-        self.pitch_dict_decode = {v: k for k, v in self.pitch_dict.items()}
         self.instrument_dict_decode = {v: k for k, v in self.instrument_dict.items()}
         self.velocity_dict_decode = {v: k for k, v in self.velocity_dict.items()}
 
@@ -227,7 +226,7 @@ class MusicTokenizer():
         out.append(self.timeshift_dict[x[1]])
         out.append(self.duration_dict[x[2]])
         out.append(self.octave_dict[x[3]])  
-        out.append(self.pitch_dict[x[4]])
+        out.append(self.pitch_dict_base + x[4] )
         out.append(self.instrument_dict[x[5]])
         out.append(self.velocity_dict[x[6]])
         return out
@@ -243,7 +242,7 @@ class MusicTokenizer():
             timeshift = self.timeshift_dict_decode[x[0].item()]
             duration = self.duration_dict_decode[x[1].item()]
             octave = self.octave_dict_decode[x[2].item()]
-            pitch = self.pitch_dict_decode[x[3].item()]
+            pitch = x[3].item() - self.pitch_dict_base
             instrument = self.instrument_dict_decode[x[4].item()]
             velocity = self.velocity_dict_decode[x[5].item()]
             # print(f"onset:{onset}, duration:{duration}, octave:{octave}.pitch:{pitch}, instrument:{instrument},  velocity{velocity}")
