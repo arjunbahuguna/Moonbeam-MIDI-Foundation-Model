@@ -1228,6 +1228,54 @@ Running the CPT model on these SAME benchmarks quantifies forgetting on actual t
 
 Rows can be combined — the key ablation axes are: (1) regularization, (2) resolution, (3) initialization. Data mixing and L_anchor should be in all non-baseline runs.
 
+### 8.8 Seyir (Melodic Progression) Analysis
+
+Turkish makam melodies follow characteristic melodic movement patterns called **seyir**: ascending (çıkıcı), descending (inici), or ascending-descending (inici-çıkıcı). Each makam has a prescribed seyir type.
+
+- Generate pieces (unconditionally or conditioned on makam if Phase 2 is available)
+- Extract the overall pitch contour: fit a linear regression to the pitch-vs-time curve, or compute the centroid pitch in each quarter of the piece
+- Classify the generated seyir as ascending/descending/mixed
+- Compare to the known seyir for each makam (available in musicological references)
+- Report **seyir accuracy**: % of generated pieces whose contour matches the expected seyir type
+
+This tests whether the model learned makam-specific **melodic grammar**, not just pitch distributions.
+
+### 8.9 Karar (Final/Resting Note) Accuracy
+
+Each makam has a **karar** (tonic/finalis) — the note on which melodies typically resolve. For example, Rast resolves on C, Hicaz on A.
+
+- For each generated piece, extract the final pitched note (ignoring silence/rests)
+- Compute the distance in cents from the nearest expected karar for the inferred makam
+- Report: (a) **karar accuracy** = % of pieces where final note is within ±25 cents of correct karar, (b) **mean karar error** in cents
+- This is a simple, single-number-per-piece metric that directly measures tonal coherence
+
+### 8.10 Pitch Stability / Jitter Metric
+
+A well-trained model should produce **stable** pitch categories — the same scale degree should appear at a consistent cent value throughout a piece.
+
+- For each generated piece, identify repeated pitch classes (e.g., all instances of ~E-50c)
+- Cluster pitches by proximity (±15 cent threshold) to group instances of the same scale degree
+- Compute the **intra-cluster standard deviation** in cents for each cluster
+- Report the mean across all clusters and pieces
+- Low jitter (< 5-8 cents) → model internalized stable pitch categories; high jitter → unstable representations
+
+### 8.11 Per-Makam Perplexity Breakdown
+
+- Report held-out perplexity **per makam** (not just aggregate over all SymbTr)
+- SymbTr has ~164 makams with uneven distribution. Common makams (Hicaz, Rast, Hüseyni, ~100+ pieces each) should have lower perplexity; rare makams (~5-10 pieces) test generalization
+- Plot perplexity vs. training set size per makam — expect a power-law relationship
+- This reveals whether the model generalizes across the makam system or just memorizes frequent patterns
+
+### 8.12 Naive Quantization Baseline
+
+Compare against a **trivial baseline**: round all microtonal pitches to the nearest western semitone (no CPT, no vocab expansion).
+
+- Train: fine-tune unmodified Moonbeam on SymbTr with all pitches snapped to nearest 12TET
+- Eval: report SymbTr perplexity, pitch accuracy, interval distribution, karar accuracy
+- This quantifies **what microtonal CPT adds** over naive treatment of Turkish music as western. If the naive baseline performs well on everything except pitch precision, it justifies the complexity of our approach. If it performs poorly across the board, it shows that pitch microtonality affects the entire modeling pipeline.
+
+This baseline is cheap (no architecture changes, just data preprocessing) and essential for a convincing paper.
+
 ---
 
 ## 9. Future Work: Makam-Conditional Generation

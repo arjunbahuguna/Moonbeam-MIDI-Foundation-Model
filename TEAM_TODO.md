@@ -37,10 +37,15 @@
 | **D6.** Embedding viz | NOT STARTED | Needs trained model |
 | **D7.** Makam-specific eval | NOT STARTED | Needs trained model + SymbTr metadata |
 | **D8.** Listening test | NOT STARTED | Needs generated samples |
+| **D9.** Seyir (melodic progression) analysis | NOT STARTED | Needs generated samples + makam seyir reference |
+| **D10.** Karar (finalis) accuracy | NOT STARTED | Needs generated samples + makam karar reference |
+| **D11.** Pitch stability / jitter metric | NOT STARTED | Needs generated samples |
+| **D12.** Per-makam perplexity breakdown | NOT STARTED | Needs trained model + SymbTr metadata |
+| **D13.** Naive quantization baseline | NOT STARTED | Needs SymbTr data (A2); no arch changes |
 
 **Summary:** All model/tokenizer/training-loop code (B1-B5, C1-C4, C6, D1-D3) is DONE.
 **Test suite:** 57 unit tests in `tests/test_microtonal.py` (run: `python -m pytest tests/test_microtonal.py -v --noconftest`).
-Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D8).
+Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D13).
 **Critical path:** A2 (SymbTr preprocessing) → A3 (augmentation) → C5 (mixing) → first training run → D4+ (evaluation).
 
 ### Future: Conditional Generation (Phase 2+)
@@ -69,6 +74,11 @@ A4. Western replay data  B4. convert_to/from_lang_tokens C3. L_anchor reg.      
                                                          C6. GRU accuracy logging   D6. Eval: embedding viz
                                                                                     D7. Eval: makam-specific
                                                                                     D8. Eval: listening test
+                                                                                    D9. Eval: seyir analysis
+                                                                                    D10. Eval: karar accuracy
+                                                                                    D11. Eval: pitch jitter
+                                                                                    D12. Eval: per-makam PPL
+                                                                                    D13. Naive quant. baseline
 
                          ┌──────────────────────────────────────────────────────────┐
                          │  A + B must complete before C can do integration runs    │
