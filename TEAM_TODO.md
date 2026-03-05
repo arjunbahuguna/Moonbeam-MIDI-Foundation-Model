@@ -39,8 +39,18 @@
 | **D8.** Listening test | NOT STARTED | Needs generated samples |
 
 **Summary:** All model/tokenizer/training-loop code (B1-B5, C1-C4, C6, D1-D3) is DONE.
+**Test suite:** 57 unit tests in `tests/test_microtonal.py` (run: `python -m pytest tests/test_microtonal.py -v --noconftest`).
 Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D8).
 **Critical path:** A2 (SymbTr preprocessing) → A3 (augmentation) → C5 (mixing) → first training run → D4+ (evaluation).
+
+### Future: Conditional Generation (Phase 2+)
+
+SymbTr filenames encode three labels: `[makam]--[form]--[usul]--[title]--[artist]`.
+These are directly usable as metadata conditions via Moonbeam's existing conditional generation framework:
+- **Phase 2:** Makam as metadata token (e.g., `makam_Hicaz = -334`). Minimal code: new dataset class + new negative token IDs. See `review_plan_microtok.md` Section 9.
+- **Phase 3a:** Makam scale degrees as temporal condition (between `<soc>`/`<eoc>`).
+- **Phase 3b:** Usul (rhythmic cycle) as temporal condition.
+- All phases depend on Phase 1 (CPT) being complete.
 
 ---
 
@@ -145,16 +155,31 @@ Modify `midi_to_compound()` (line 341) — add pitchbend tracking + note-0 filte
 **Files:** `data_preprocess.py`, new `model_config_microtonal.json` (from B1)
 **Blocked by:** A1, B1
 
+**SymbTr dataset properties** (from `symbtr/` documentation):
+- 3000 Type-1 two-track MIDI files at 480 ticks/beat
+- 52 unique pitchbend values (-1932 to +2009), max deviation ~49 cents
+- 40 unique MIDI note values (range 55-96, octaves 4-8), plus note 0 (rest marker)
+- Mostly monophonic, single channel (instrument=0 piano)
+- Most pieces 1-5 minutes (median ~2.5 min), a few outliers up to 35 min
+- File naming: `[makam]--[form]--[usul]--[title]--[artist]` (labels extractable for conditional gen)
+- Latest version: https://zenodo.org/records/15470412
+
+**Steps:**
 1. Point `data_preprocess.py` at SymbTr v3 MIDI directory
 2. Instantiate tokenizer with `microtonal=True, pitchbend_sensitivity=2.0`
-3. Use `model_config_microtonal.json` for vocab limits
-4. Output `.npy` files with pitch in cents (int 0-1199)
-5. Generate train/test CSV split (80/20 or use existing SymbTr splits if available)
-6. **Verify:** no notes exceed `onset_vocab_size-3=4096` or `dur_vocab_size-3=4096` (SymbTr pieces are short — should be fine)
+3. Call `tokenizer.midi_to_compound(midi_path)` for each file — this already handles:
+   - Pitchbend tracking + canonical pitch computation
+   - Note-0 rest marker filtering
+   - Microtonal octave/cents decomposition
+4. Use `model_config_microtonal.json` for vocab limits
+5. Output `.npy` files with pitch in cents (int 0-1199)
+6. Generate train/test CSV split (80/20 or use existing SymbTr splits if available)
+7. **Verify:** no notes exceed `onset_vocab_size-3=4096` or `dur_vocab_size-3=4096` (SymbTr pieces are short — should be fine)
+8. Also extract makam/form/usul labels from filenames into the CSV (for future conditional gen)
 
-**Key detail:** `.npy` files store **integer cents** for pitch. Conversion to fractional semitones happens at training time (TODO C2), NOT here.
+**Key detail:** `.npy` files store **integer cents** for pitch. Conversion to fractional semitones happens in `embed_tokens` (modeling_llama.py line 1437), NOT here or in the training loop.
 
-**Acceptance:** `processed/` folder with `.npy` files + `split.csv`, verified with spot-checks.
+**Acceptance:** `processed/` folder with `.npy` files + `split.csv` (with makam labels), verified with spot-checks.
 
 ---
 

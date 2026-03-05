@@ -1,8 +1,15 @@
 # Microtonal Continual Pretraining for Moonbeam — Full Analysis & TODO
 
 > **Status (2026-03-05):** All model/tokenizer/training-loop code is IMPLEMENTED on `microtonal_cpt` branch
-> (streams B, C1-C4, C6, D1-D3). Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D8).
+> (streams B, C1-C4, C6, D1-D3). **57 unit tests passing** (`tests/test_microtonal.py`).
+> Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D8).
 > See TEAM_TODO.md for detailed per-task status. Critical path: A2 (SymbTr preprocessing) → C5 (mixing) → first training run → evaluation.
+>
+> **NOTE on Section 6.5.2 Change 2 below:** The original plan said `convert_from_language_tokens()` should
+> divide pitch by 100.0. This was CHANGED during implementation — `convert_from` now returns **integer cents**
+> (no division), and the single authoritative `/100.0` conversion happens in `embed_tokens` (modeling_llama.py
+> line 1437). This handles both training and inference paths uniformly. The prose in 6.5.2 is kept for
+> historical context but the ACTUAL implementation differs — see TEAM_TODO.md task D2.
 
 ## 1. Current State of the Codebase
 
