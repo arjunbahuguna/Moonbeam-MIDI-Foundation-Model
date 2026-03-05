@@ -6,6 +6,44 @@
 
 ---
 
+## Implementation Status (updated 2026-03-05)
+
+| Task | Status | Notes |
+|------|--------|-------|
+| **A1.** Microtonal MIDI parsing | DONE | Helper functions + midi_to_compound in music_tokenizer.py |
+| **A2.** SymbTr data preprocessing | NOT STARTED | Needs SymbTr dataset + data_preprocess.py pointed at it |
+| **A3.** 53-TET augmentation | NOT STARTED | Needs A2 complete |
+| **A4.** Western replay data | NOT STARTED | Needs Lakh subset with pitch*100 conversion |
+| **B1.** Model config | DONE | model_config_microtonal.json created |
+| **B2.** modeling_llama.py bugfixes | DONE | .long() cast, position_ids dtype fix |
+| **B3.** Append-only pitch_dict | DONE | In music_tokenizer.py |
+| **B4.** convert_to/from_language_tokens | DONE | Returns integer cents; /100.0 only in embed_tokens |
+| **B5.** Weight transfer + interpolation | DONE | microtonal_utils.py: expand_vocab_with_interpolation |
+| **C1.** CPT training script | DONE | real_finetuning_microtonal.py |
+| **C1b.** LoRA + training strategy | DONE | Decoder unfreezing after PEFT, documented in peft.py |
+| **C2.** Float pitch in training loop | DONE | pitch /100.0 in modeling_llama.py embed_tokens (line 1437), not train_utils.py |
+| **C3.** L_anchor regularization | DONE | In train_utils.py train_con_gen(), logged to wandb |
+| **C3b.** L_smooth regularization | DONE | Adjacent-bin pairs, logged to wandb |
+| **C4.** Per-param LR groups | DONE | 3 param groups (LoRA, decoder head, GRU) + 3x gradient scaling hook for new rows in real_finetuning_microtonal.py |
+| **C5.** Data mixing logic | NOT DONE | Needs A2+A4 (WeightedRandomSampler code in TODO) |
+| **C6.** GRU accuracy logging | DONE | Per-attribute + western/micro pitch split in modeling_llama.py |
+| **D1.** Inference float buffer | DONE | generation.py: float32 token buffer |
+| **D2.** convert_from → cents (no /100.0) | DONE | Returns integer cents; embed_tokens handles /100.0 for both training+inference |
+| **D3.** compound_to_midi pitchbend | DONE | Rewritten with pitchwheel messages |
+| **D4.** Evaluation script | NOT STARTED | Can scaffold structure before dataset |
+| **D4b.** Ablation table | NOT STARTED | Needs trained model |
+| **D4c.** TF-AR accuracy gap | NOT STARTED | Needs trained model |
+| **D5.** Western forgetting eval | NOT STARTED | Needs trained model + western test set |
+| **D6.** Embedding viz | NOT STARTED | Needs trained model |
+| **D7.** Makam-specific eval | NOT STARTED | Needs trained model + SymbTr metadata |
+| **D8.** Listening test | NOT STARTED | Needs generated samples |
+
+**Summary:** All model/tokenizer/training-loop code (B1-B5, C1-C4, C6, D1-D3) is DONE.
+Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D8).
+**Critical path:** A2 (SymbTr preprocessing) → A3 (augmentation) → C5 (mixing) → first training run → D4+ (evaluation).
+
+---
+
 ## Overview: 4 Parallel Streams
 
 ```
@@ -779,26 +817,22 @@ t_tensor = torch.tensor(t, dtype=torch.float32, device="cuda")
 
 ---
 
-### D2. `convert_from_language_tokens` → Fractional Semitones
+### D2. `convert_from_language_tokens` → Integer Cents
 
 **Owner:** ___
-**File:** `music_tokenizer.py`, line 258
+**File:** `music_tokenizer.py`
 **Blocked by:** B3, B4
 
-After decoding pitch from language token to cents (via `pitch_dict_decode`), convert to fractional semitones for the next event's transformer input:
+Decode language token IDs back to compound tokens. Pitch is returned as integer cents
+(0-1199) — NOT divided by 100.0. The single /100.0 conversion to fractional semitones
+lives in `embed_tokens` (modeling_llama.py line ~1437), which handles both training
+(data loader cents) and inference (this path). This avoids the double-division bug
+that would occur if both convert_from and embed_tokens each divided by 100.0.
 
-```python
-# In convert_from_language_tokens, line 258:
-pitch_cents = self.pitch_dict_decode[x[3].item()]
-if self.microtonal:
-    pitch = pitch_cents / 100.0  # cents → fractional semitones for FME
-else:
-    pitch = pitch_cents  # already 0-11 integer
-```
+`compound_to_midi` also converts cents/100.0 internally when `microtonal=True`.
 
-**Also:** Line 263 creates `torch.tensor(out)` — with float pitch, the entire tensor auto-promotes to float. This is correct since the token buffer (D1) is now float32.
-
-**Acceptance:** Generated pitch values are fractional semitones (e.g., 3.5 for E−50 cents).
+**Acceptance:** EOS detection works (`1201 == 1201`). embed_tokens converts cents to
+fractional semitones once. No double-division in the coupled inference loop.
 
 ---
 

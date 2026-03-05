@@ -1,5 +1,9 @@
 # Microtonal Continual Pretraining for Moonbeam — Full Analysis & TODO
 
+> **Status (2026-03-05):** All model/tokenizer/training-loop code is IMPLEMENTED on `microtonal_cpt` branch
+> (streams B, C1-C4, C6, D1-D3). Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D8).
+> See TEAM_TODO.md for detailed per-task status. Critical path: A2 (SymbTr preprocessing) → C5 (mixing) → first training run → evaluation.
+
 ## 1. Current State of the Codebase
 
 ### Branches
