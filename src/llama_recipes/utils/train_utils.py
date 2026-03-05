@@ -625,7 +625,7 @@ def train_overfit(model, batch, train_dataloader,eval_dataloader, tokenizer, opt
 
     return results
 
-def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_scheduler, starting_epoch, starting_step,gradient_accumulation_steps, train_config, fsdp_config=None, ddp_config=None, local_rank=None, rank=None, wandb_run=None):
+def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_scheduler, starting_epoch, starting_step,gradient_accumulation_steps, train_config, fsdp_config=None, ddp_config=None, local_rank=None, rank=None, wandb_run=None, microtonal_reg=None):
     """
     Trains the model on the given dataloader
 
@@ -640,6 +640,10 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
         train_config: The training configuration
         eval_dataloader: The dataloader containing the eval data
         tokenizer: tokenizer used in the eval for decoding the predicitons
+        microtonal_reg: Optional dict for microtonal embedding regularization.
+            When provided, adds two auxiliary losses: L_anchor (MSE penalty preventing
+            pretrained western pitch embeddings from drifting) and L_smooth (encourages
+            adjacent cent-resolution pitch bins to have similar embeddings).
 
     Returns: results dictionary containing average training and validation perplexity and loss
     """
@@ -708,6 +712,25 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                                 batch[key] = batch[key].to('cuda:0')
                     with autocast():
                         loss = model(**batch).loss
+                    # Microtonal embedding regularization (anchor + smoothness)
+                    if microtonal_reg is not None:
+                        reg = microtonal_reg
+                        w_ids = reg['western_ids']
+                        # L_anchor: penalize drift of pretrained western pitch embeddings
+                        L_anchor = reg['lambda_anchor'] * (
+                            torch.mean((reg['decoder_emb_weight'][w_ids] - reg['frozen_decoder_emb']) ** 2) +
+                            torch.mean((reg['lm_head_weight'][w_ids] - reg['frozen_lm_head']) ** 2)
+                        )
+                        # L_smooth: adjacent cent bins should have similar embeddings
+                        left = reg['micro_pair_ids_left']
+                        right = reg['micro_pair_ids_right']
+                        L_smooth = (
+                            torch.mean((reg['decoder_emb_weight'][right] - reg['decoder_emb_weight'][left]) ** 2) +
+                            torch.mean((reg['lm_head_weight'][right] - reg['lm_head_weight'][left]) ** 2)
+                        ) * reg['lambda_smooth']
+                        loss = loss + L_anchor + L_smooth
+                        reg['_last_L_anchor'] = L_anchor.detach().float().item()
+                        reg['_last_L_smooth'] = L_smooth.detach().float().item()
                     loss = loss / gradient_accumulation_steps
                     if train_config.save_metrics:
                         train_step_loss.append(loss.detach().float().item())
@@ -716,6 +739,15 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                     if train_config.use_fp16:
                         # if fp16 is enabled, use gradient scaler to handle gradient update
                         scaler.scale(loss).backward()
+                        # Warmup freeze: zero gradients on western pitch rows for the first
+                        # N steps, letting new microtonal rows catch up from interpolation init
+                        if microtonal_reg is not None and total_train_steps <= microtonal_reg.get('warmup_freeze_steps', 0):
+                            reg = microtonal_reg
+                            w_ids = reg['western_ids']
+                            if reg['decoder_emb_weight'].grad is not None:
+                                reg['decoder_emb_weight'].grad[w_ids] = 0
+                            if reg['lm_head_weight'].grad is not None:
+                                reg['lm_head_weight'].grad[w_ids] = 0
                         if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                             if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                                 scaler.unscale_(optimizer)
@@ -730,6 +762,15 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                     else:
                         # regular backpropagation when fp16 is not used
                         loss.backward()
+                        # Warmup freeze: zero gradients on western pitch rows for the first
+                        # N steps, letting new microtonal rows catch up from interpolation init
+                        if microtonal_reg is not None and total_train_steps <= microtonal_reg.get('warmup_freeze_steps', 0):
+                            reg = microtonal_reg
+                            w_ids = reg['western_ids']
+                            if reg['decoder_emb_weight'].grad is not None:
+                                reg['decoder_emb_weight'].grad[w_ids] = 0
+                            if reg['lm_head_weight'].grad is not None:
+                                reg['lm_head_weight'].grad[w_ids] = 0
                         if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                             if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                                 if train_config.enable_fsdp:
@@ -745,18 +786,33 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                         TFlops = profile_context.get_flops_per_sec() / 1e12
                     if wandb_run:
                         if not train_config.enable_fsdp or rank==0:
-                            wandb_run.log({
+                            log_dict = {
                                 'train/epoch': epoch + 1,
                                 'train/step': epoch * len(train_dataloader) + step,
                                 'train/loss': loss.detach().float(),
-                            })
+                            }
+                            # Log regularization losses
+                            if microtonal_reg is not None:
+                                if '_last_L_anchor' in microtonal_reg:
+                                    log_dict['train/L_anchor'] = microtonal_reg['_last_L_anchor']
+                                if '_last_L_smooth' in microtonal_reg:
+                                    log_dict['train/L_smooth'] = microtonal_reg['_last_L_smooth']
+                            # Log per-attribute GRU decoder accuracy
+                            inner_model = getattr(model, 'module', model)
+                            if hasattr(inner_model, 'base_model'):
+                                inner_model = inner_model.base_model.model
+                            gru_acc = getattr(inner_model, '_gru_acc', None)
+                            if gru_acc:
+                                for attr_name, acc in gru_acc.items():
+                                    log_dict[f'train/gru_acc/{attr_name}'] = acc
+                            wandb_run.log(log_dict)
 
                     pbar.set_description(f"Training Epoch: {epoch}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
 
                     if train_config.save_metrics:
                         save_to_json(metrics_filename, train_step_loss, train_loss, train_step_perplexity, train_prep, val_step_loss, val_loss, val_step_perplexity, val_prep)
-                
-                
+
+
                     #TODO: More frequent evaluation; Remember to switch on model.train again
                     if step%train_config.validation_interval==0:
                         eval_ppl, eval_epoch_loss, temp_val_loss, temp_step_perplexity = evaluation(model, train_config, eval_dataloader, local_rank, tokenizer, wandb_run)
