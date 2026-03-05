@@ -6,6 +6,23 @@ from dataclasses import dataclass
 
 @dataclass
 class train_config:
+    # -------------------------------------------------------------
+    # Hyperparameter guidance:
+    #
+    # MOONBEAM PRETRAINING FROM SCRATCH (paper Section 4.1, Guo & Dixon 2025):
+    #   lr=3e-4, gamma=0.85 (StepLR per epoch), Adam, weight_decay=0.0,
+    #   context_length=1024, mixed precision (fp16), DDP on 2x A100,
+    #   <9 epochs, batch packing.
+    #
+    # MICROTONAL CONTINUAL PRETRAINING (CPT) — recommended:
+    #   lr=1e-5 to 3e-5  (10-30x lower than pretraining to preserve knowledge)
+    #   weight_decay=0.01 (mild regularization)
+    #   gamma=0.85        (keep same decay schedule)
+    #   gradient_clipping=True, threshold=1.0  (stabilize early training)
+    #   num_epochs=5-10   (CPT converges faster than from-scratch)
+    #   context_length=1024 (MUST match pretrained model)
+    #   mixed_precision=True, use_fp16=True (same as pretraining)
+    # -------------------------------------------------------------
     model_name: str="PATH/to/Model"
     tokenizer_name: str=None
     enable_fsdp: bool=False
@@ -15,17 +32,17 @@ class train_config:
     validation_interval: int=200
     batch_size_training: int=4
     batching_strategy: str="packing" #alternative: padding
-    context_length: int=1024
+    context_length: int=1024  # Must match pretrained model (1024 for Moonbeam S/M)
     gradient_accumulation_steps: int=1
-    gradient_clipping: bool = False
+    gradient_clipping: bool = False  # Set True for CPT (stabilizes early steps)
     gradient_clipping_threshold: float = 1.0
     num_epochs: int=3
     max_train_step: int=0
     max_eval_step: int=0
     num_workers_dataloader: int=1
-    lr: float=1e-4
-    weight_decay: float=0.0
-    gamma: float= 0.85
+    lr: float=1e-4  # Pretraining default. For CPT use 1e-5 to 3e-5.
+    weight_decay: float=0.0  # Pretraining default. For CPT use 0.01.
+    gamma: float= 0.85  # LR decay per epoch (same for pretraining and CPT)
     seed: int=42
     use_fp16: bool=False
     mixed_precision: bool=True

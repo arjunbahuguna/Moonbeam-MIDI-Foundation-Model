@@ -937,8 +937,8 @@ class LlamaSdpaAttention(LlamaAttention):
         where_eos = (position_ids[..., 0] == self.config.eos_token).unsqueeze(-1) 
         
         #Since SOS and EOS are negative number, temporarily change it to 0 to avoid indexing error
-        position_ids_sos = torch.where(where_sos, torch.tensor([0 for _ in range(6)]).to(hidden_states.device), position_ids)
-        position_ids_eos = torch.where(where_eos, torch.tensor([2**15 for _ in range(6)]).to(hidden_states.device), position_ids_sos)
+        position_ids_sos = torch.where(where_sos, torch.tensor([0 for _ in range(6)]).to(position_ids), position_ids)
+        position_ids_eos = torch.where(where_eos, torch.tensor([2**15 for _ in range(6)]).to(position_ids), position_ids_sos)
         position_ids = position_ids_eos
 
         #Extend this to new tokens positions
@@ -946,9 +946,9 @@ class LlamaSdpaAttention(LlamaAttention):
             for token_id in additional_token_map:
                 where_new_token = (position_ids[..., 0] == token_id).unsqueeze(-1)
                 if str(token_id) in additional_tokens_pos_map:
-                    position_ids = torch.where(where_new_token, torch.tensor(additional_tokens_pos_map[str(token_id)]).to(hidden_states.device), position_ids)
+                    position_ids = torch.where(where_new_token, torch.tensor(additional_tokens_pos_map[str(token_id)]).to(position_ids), position_ids)
                 else:
-                    position_ids = torch.where(where_new_token, torch.tensor([0 for _ in range(6)]).to(hidden_states.device), position_ids) #TODO: COMMU, add pos for min max vel, pitch
+                    position_ids = torch.where(where_new_token, torch.tensor([0 for _ in range(6)]).to(position_ids), position_ids) #TODO: COMMU, add pos for min max vel, pitch
         cos_onset, sin_onset = self.rotary_emb_onset(value_states, position_ids[:, :, 0]) #position_ids: batch, len, 6; last dim: (onset, duration, octave, pitch_class, instrument, velocity)
         cos_dur, sin_dur = self.rotary_emb_dur(value_states, position_ids[:, :, 1]) 
         cos_octave, sin_octave = self.rotary_emb_octave(value_states, position_ids[:, :, 2]) 
@@ -1433,8 +1433,13 @@ class LlamaModel(LlamaPreTrainedModel):
         onsets = self.onset_embedding(input_ids_tmp[..., 0])
         durs = self.dur_embedding(input_ids_tmp[..., 1])
         octaves = self.octave_embedding(input_ids_tmp[..., 2]) 
-        pitch_classes = self.pitch_embedding(input_ids_tmp[..., 3])
-        instruments = self.instrument_embedding(input_ids_tmp[..., 4]) 
+        pitch_input = input_ids_tmp[..., 3]
+        if getattr(self.config, 'microtonal', False):
+            # Pitch stored as integer cents (0-1199); convert to fractional semitones
+            # (0.00-11.99) to stay within the FME input range from pretraining (0-11)
+            pitch_input = pitch_input.float() / 100.0
+        pitch_classes = self.pitch_embedding(pitch_input)
+        instruments = self.instrument_embedding(input_ids_tmp[..., 4].long())
         velocities = self.velocity_embedding(input_ids_tmp[..., 5])
         out_fme = torch.concat([onsets, durs, octaves, pitch_classes, instruments, velocities], dim=-1) #batch, len, dim*6
         
@@ -1811,24 +1816,53 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 generation_logits = [generation_logits]
             
             elif self.decoder_attn_implementation == "GRU": #DANGEROURS: here shift labels contain SOS_decoding token / does not need EOS?
-                shift_logits_x_flattened = shift_logits_x.view(-1, shift_logits_x.shape[-1]) #batch*(len_x-1), dim 
+                shift_logits_x_flattened = shift_logits_x.view(-1, shift_logits_x.shape[-1]) #batch*(len_x-1), dim
                 shift_labels_x_flattened = shift_labels_x.view(-1, shift_labels_x.shape[-1]) #batch*(len_x-1), onset_vocab_size + dur_size + .. + vel_size / batch*(len_x-1), len_y
-                
+
                 shift_labels_x_y = shift_labels_x_flattened[:, 1:].contiguous() #batch*(len_x-1), len_y-1(1:)
-                
+
                 shift_labels_x_y_encoded = self.decoder_embedding(shift_labels_x_flattened[:, :-1]) #batch*(len_x-1), len_y-1(:-1), dim
                 generation_logits, generation_hidden_state = self.decoder(shift_labels_x_y_encoded, shift_logits_x_flattened.unsqueeze(0).expand(self.decoder.num_hidden_layers, -1, -1)) #batch*(len_x-1), len_y-1, decode_vocab_size
 
                 generation_logits = [generation_logits]
 
-            elif self.decoder_attn_implementation == "LSTM": #DANGEROURS: here shift labels contain SOS_decoding token 
+            elif self.decoder_attn_implementation == "LSTM": #DANGEROURS: here shift labels contain SOS_decoding token
                 print("not yet implemented")
 
             generation_logits= self.lm_head(generation_logits[0]).float().view(-1, self.config.decode_vocab_size)
             shift_labels_x_y = shift_labels_x_y.view(-1)
             loss = self.loss_func(generation_logits, shift_labels_x_y)
+
+            # Per-attribute GRU decoder accuracy
+            # Logits and labels are flattened across (batch * seq_len * 6_attributes).
+            # Reshape to (N, 6) to measure accuracy per compound token attribute
+            if self.training:
+                with torch.no_grad():
+                    preds = generation_logits.argmax(dim=-1)
+                    correct = (preds == shift_labels_x_y)
+                    n_tokens = correct.shape[0] // 6
+                    if n_tokens > 0:
+                        correct_2d = correct[:n_tokens * 6].view(n_tokens, 6)
+                        self._gru_acc = {
+                            name: correct_2d[:, i].float().mean().item()
+                            for i, name in enumerate(
+                                ['timeshift', 'duration', 'octave', 'pitch', 'instrument', 'velocity'])
+                        }
+                        # Split pitch accuracy into western semitone vs microtonal bins
+                        # Pitch labels are at GRU step index 3; IDs 8212-8223 are the 12
+                        # western pitch classes, IDs >= 8487 are appended microtonal bins
+                        if getattr(self.config, 'microtonal', False):
+                            labels_2d = shift_labels_x_y[:n_tokens * 6].view(n_tokens, 6)
+                            pitch_labels = labels_2d[:, 3]
+                            is_western = (pitch_labels >= 8212) & (pitch_labels <= 8223)
+                            is_micro = pitch_labels >= 8487
+                            if is_western.any():
+                                self._gru_acc['pitch_western'] = correct_2d[is_western, 3].float().mean().item()
+                            if is_micro.any():
+                                self._gru_acc['pitch_micro'] = correct_2d[is_micro, 3].float().mean().item()
+
         elif decoded_language_tokens is not None and decoded_hidden_state is not None: #else during inference (decoding)--> inference autoregressively, return generated tokens
-            if self.decoder_attn_implementation == "GRU":              
+            if self.decoder_attn_implementation == "GRU":
                 decoded_language_tokens_encoded = self.decoder_embedding(decoded_language_tokens)##batch*len_x, len_y--> batch*lenx, len_y, dim
                 generation_logits_flattened, generation_hidden_state_flattened = self.decoder(decoded_language_tokens_encoded, decoded_hidden_state) #output: batch*len_x, len_y, dim ,  hidden state: num_layers, batch*len_x, dim
                 
