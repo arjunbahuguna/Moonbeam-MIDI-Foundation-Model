@@ -89,7 +89,16 @@ class MusicLlama:
             model.to("cuda")
         model.eval()
 
-        tokenizer = MusicTokenizer(timeshift_vocab_size = llama_config.onset_vocab_size, dur_vocab_size = llama_config.dur_vocab_size, octave_vocab_size = llama_config.octave_vocab_size, pitch_class_vocab_size = llama_config.pitch_class_vocab_size, instrument_vocab_size = llama_config.instrument_vocab_size, velocity_vocab_size = llama_config.velocity_vocab_size)
+        tokenizer = MusicTokenizer(
+            timeshift_vocab_size=llama_config.onset_vocab_size,
+            dur_vocab_size=llama_config.dur_vocab_size,
+            octave_vocab_size=llama_config.octave_vocab_size,
+            pitch_class_vocab_size=llama_config.pitch_class_vocab_size,
+            instrument_vocab_size=llama_config.instrument_vocab_size,
+            velocity_vocab_size=llama_config.velocity_vocab_size,
+            microtonal=getattr(llama_config, 'microtonal', False),
+            pitchbend_sensitivity=getattr(llama_config, 'pitchbend_sensitivity', 2.0),
+        )
         
         if torch.cuda.is_bf16_supported():
             torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
@@ -145,12 +154,16 @@ class MusicLlama:
         total_len = min(self.config.max_len, max_gen_len + max_prompt_len) 
 
         pad_id = self.tokenizer.pad_token_compound
-        pad_tensor = torch.tensor(pad_id, dtype=torch.long, device="cuda").unsqueeze(0).unsqueeze(0) #create a tensor with shape: (bsz, total_len, 6) filled with pad_id
-        tokens = pad_tensor.expand(bsz, total_len, -1).clone() #6, --> bsz, total_len, 6
+        # Use float32 for microtonal mode: pitch values are integer cents stored as float
+        # (e.g., 550.0 for E+50cents). embed_tokens converts cents/100.0 to fractional
+        # semitones. Integer attributes are unaffected; instrument gets .long() cast.
+        buf_dtype = torch.float32 if getattr(self.config, 'microtonal', False) else torch.long
+        pad_tensor = torch.tensor(pad_id, dtype=buf_dtype, device="cuda").unsqueeze(0).unsqueeze(0)
+        tokens = pad_tensor.expand(bsz, total_len, -1).clone()
 
-        for k, t in enumerate(prompt_tokens): 
-            t_tensor = torch.tensor(t, dtype=torch.long, device="cuda")  # (len_t, 6) 
-            tokens[k, :len(t)] = t_tensor  #tokens[k, :len(t)] --> len_t, 6
+        for k, t in enumerate(prompt_tokens):
+            t_tensor = torch.tensor(t, dtype=buf_dtype, device="cuda")
+            tokens[k, :len(t)] = t_tensor
 
 
         prev_pos = 0
@@ -297,8 +310,12 @@ class MusicLlama:
             {
                 "generation": {
                     "role": "assistant",
-                    "content": self.tokenizer.compound_to_midi(t), 
-                    "prompt": self.tokenizer.compound_to_midi(p),
+                    "content": self.tokenizer.compound_to_midi(
+                        t, microtonal=self.tokenizer.microtonal,
+                        pitchbend_sensitivity=self.tokenizer.pitchbend_sensitivity),
+                    "prompt": self.tokenizer.compound_to_midi(
+                        p, microtonal=self.tokenizer.microtonal,
+                        pitchbend_sensitivity=self.tokenizer.pitchbend_sensitivity),
                     "prompt_tokens": p,
                     "tokens": t,
                 },
