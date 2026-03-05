@@ -12,12 +12,14 @@
 STREAM A (Data)          STREAM B (Model+Tokenizer)     STREAM C (Training)        STREAM D (Inference+Eval)
 ─────────────────        ─────────────────────────       ──────────────────         ─────────────────────────
 A1. Port MIDI parsing    B1. Model config                C1. CPT training script    D1. Inference float buffer
-A2. SymbTr preprocess    B2. modeling_llama bugfixes      C2. Float pitch in loop    D2. convert_from → frac.semi
-A3. 53-TET augmentation  B3. Append-only pitch_dict       C3. L_anchor reg.          D3. compound_to_midi pitchbend
-A4. Western replay data  B4. convert_to/from_lang_tokens  C4. Per-param LR groups    D4. Evaluation script
-                         B5. Weight transfer code          C5. Data mixing logic      D5. Eval: western forgetting
-                                                          C6. GRU accuracy logging   D6. Eval: embedding viz
-                                                                                     D7. Eval: makam-specific
+A2. SymbTr preprocess    B2. modeling_llama bugfixes     C1b. LoRA + training strat  D2. convert_from → frac.semi
+A3. 53-TET augmentation  B3. Append-only pitch_dict      C2. Float pitch in loop    D3. compound_to_midi pitchbend
+A4. Western replay data  B4. convert_to/from_lang_tokens C3. L_anchor reg.          D4. Evaluation script
+                         B5. Weight transfer code        C3b. L_smooth reg.          D4b. Ablation table
+                                                         C4. Per-param LR groups    D5. Eval: western forgetting
+                                                         C5. Data mixing logic      D6. Eval: embedding viz
+                                                         C6. GRU accuracy logging   D7. Eval: makam-specific
+                                                                                    D8. Eval: listening test
 
                          ┌──────────────────────────────────────────────────────────┐
                          │  A + B must complete before C can do integration runs    │
@@ -226,7 +228,7 @@ New IDs:      9675 - 8487 = 1188 microtonal pitch tokens appended after position
 | **1-cent (default)** | 1202 | 9675 | 1188 | ~90% | ±0.5 cent |
 | **10-cent (ablation)** | 122 | 8595 | 108 | ~50% | ±5 cent |
 
-We start with **1-cent** for maximum precision. The 53-TET augmentation (A3) fills many empty bins. 10-cent is a viable ablation if the sparse decoder causes issues (see D4 ghost bin metric).
+**Decision needed:** The review plan recommends 10-cent as the pragmatic default (fewer empty bins, small decoder expansion), but 1-cent gives maximum precision and the 53-TET augmentation (A3) fills many empty bins. **Start with 10-cent (108 new tokens), ablate 1-cent (1188 new tokens).** Update `pitch_class_vocab_size` and `decode_vocab_size` accordingly.
 
 **Acceptance:** Config file passes JSON validation. `decode_vocab_size` = 9675.
 
@@ -448,7 +450,7 @@ for k, v in checkpoint.items():
         new_state_dict[k] = v
 
 # 3. Expand vocab with interpolation (from B5)
-expanded_state_dict = expand_vocab_with_interpolation(new_state_dict, llama_config)
+expanded_state_dict = expand_vocab_with_interpolation(new_state_dict, llama_config, tokenizer)
 
 # 4. Load expanded weights
 missing, unexpected = model.load_state_dict(expanded_state_dict, strict=False)
@@ -598,6 +600,40 @@ loss = loss + L_anchor
 
 ---
 
+### C3b. L_smooth Regularization
+
+**Owner:** ___
+**File:** Same location as C3 (in training loop, after L_anchor)
+**Blocked by:** C3
+
+Encourage nearby cents to have nearby embeddings (addresses empty bins problem — ~90% of 1200 cent bins or ~50% of 120 bins are empty in SymbTr):
+
+```python
+# After L_anchor computation:
+lambda_smooth = 0.05  # tune in [0.01, 0.1]
+
+# Get all active microtonal pitch IDs (8487+) sorted by cent value
+micro_ids = sorted(tokenizer.pitch_dict.items(), key=lambda x: x[0])  # (cent, lang_id)
+micro_ids = [(c, lid) for c, lid in micro_ids if lid >= 8487]
+
+L_smooth = 0
+for i in range(len(micro_ids) - 1):
+    c1, id1 = micro_ids[i]
+    c2, id2 = micro_ids[i + 1]
+    if c2 - c1 <= 10:  # only adjacent bins (within 10 cents)
+        L_smooth += torch.sum((model.decoder_embedding.weight[id2] - model.decoder_embedding.weight[id1]) ** 2)
+        L_smooth += torch.sum((model.lm_head.weight[id2] - model.lm_head.weight[id1]) ** 2)
+L_smooth = lambda_smooth * L_smooth / max(len(micro_ids) - 1, 1)
+
+loss = loss + L_anchor + L_smooth
+```
+
+**Impact: MEDIUM** — propagates gradient signal to untrained bins, prevents GRU from generating "ghost" tokens with random embeddings. More important with 1-cent resolution than 10-cent.
+
+**Acceptance:** Embedding distances between adjacent cent bins are correlated with cent distance.
+
+---
+
 ### C4. Per-Parameter Learning Rate Groups
 
 **Owner:** ___
@@ -620,7 +656,18 @@ param_groups = [
 optimizer = torch.optim.AdamW(param_groups, weight_decay=train_config.weight_decay)
 ```
 
-**Note:** Since `decoder_embedding.weight` is a single tensor (can't split rows into param groups), we rely on L_anchor (C3) to keep pretrained rows stable. New rows learn fast because they start from interpolation (far from optimal) while pretrained rows start near-optimal.
+**Note:** Since `decoder_embedding.weight` is a single tensor (can't split rows into param groups), we rely on L_anchor (C3) + warmup freezing (C1b) to keep pretrained rows stable. New rows learn fast because they start from interpolation (far from optimal) while pretrained rows start near-optimal.
+
+**Optional: Gradient scaling hook** for row-level LR differentiation (review plan recommends 10× higher LR for new rows):
+```python
+# Register hook to scale gradients for new rows (8487+) by 3× relative to pretrained:
+def scale_new_rows(grad):
+    scaled = grad.clone()
+    scaled[8487:] *= 3.0  # new rows get effective LR = 3e-5 * 3 = 9e-5
+    return scaled
+model.decoder_embedding.weight.register_hook(scale_new_rows)
+model.lm_head.weight.register_hook(scale_new_rows)
+```
 
 **Acceptance:** Optimizer has distinct param groups with correct LRs.
 
@@ -857,7 +904,8 @@ Run ablations across these axes once baseline CPT works:
 | CPT, no regularization | ? | ? | ? | ? | ? |
 | CPT + L_anchor only | ? | ? | ? | ? | ? |
 | CPT + L_anchor + data mixing | ? | ? | ? | ? | ? |
-| CPT + L_anchor + data mixing + 53-TET aug | ? | ? | ? | ? | ? |
+| CPT + L_anchor + L_smooth + data mixing | ? | ? | ? | ? | ? |
+| CPT + L_anchor + L_smooth + data mixing + 53-TET aug | ? | ? | ? | ? | ? |
 | CPT, interpolation init (default) | ? | ? | ? | ? | ? |
 | CPT, copy+noise init | ? | ? | ? | ? | ? |
 | CPT, 1-cent resolution (default) | ? | ? | ? | ? | ? |
@@ -965,11 +1013,38 @@ cpt_micro = cpt_model.decoder_embedding.weight[8487:9675]  # 1188 microtonal
 
 ---
 
+### D8. Evaluation — Subjective Listening Test
+
+**Owner:** ___
+**Files:** Survey design + generated MIDI/audio files
+**Blocked by:** D4 (needs trained model + generated pieces)
+
+Conduct a listening test with expert evaluators to assess generated makam music quality:
+
+**Design (following Moonbeam paper's protocol):**
+1. Generate 20-30 pieces using the CPT model (unconditional, seeded with SymbTr prompts)
+2. Include comparison samples: (a) real SymbTr excerpts, (b) Moonbeam pretrained (western-only) on same prompts, (c) CPT model output
+3. Recruit 5-10 evaluators with Turkish makam expertise (musicologists, performers, or MIR researchers)
+4. Each evaluator rates on a 1-5 Likert scale across:
+   - **Pitch accuracy**: Are the microtonal intervals correct for the makam?
+   - **Melodic coherence**: Does the melody follow a natural seyir (melodic progression)?
+   - **Scale adherence**: Do pitches stay within the expected makam scale degrees?
+   - **Overall musicality**: Does it sound like plausible makam music?
+5. Blind, randomized presentation (evaluators don't know which system produced each sample)
+
+**Analysis:**
+- Mean Opinion Score (MOS) per criterion per system
+- Wilcoxon signed-rank test for pairwise comparisons (following Moonbeam paper)
+- Inter-rater agreement (Krippendorff's alpha or Fleiss' kappa)
+
+**Acceptance:** Listening test completed, MOS scores and statistical tests reported. CPT model should score significantly higher than pretrained Moonbeam on pitch accuracy and scale adherence.
+
+---
+
 ## FUTURE WORK (NOT in this sprint)
 
 | Item | Description | Why Later |
 |------|-------------|-----------|
-| **L_smooth regularization** | Encourage nearby cents to have nearby embeddings | MEDIUM impact — add after L_anchor baseline works |
 | **L_center regularization** | Keep microtonal variants close to western anchor | LOW impact — likely skip or decay fast |
 | **GMM pitch-zone tokenizer** | Data-driven pitch quantization (fewer tokens) | Alternative to uniform grid — separate experiment |
 | **10-cent resolution variant** | Coarser grid (120 bins vs 1200) | Ablation — run after 1-cent baseline |
@@ -995,6 +1070,7 @@ cpt_micro = cpt_model.decoder_embedding.weight[8487:9675]  # 1188 microtonal
 - **Week 1:** A1-A3 and B1-B5 in parallel (all prereqs done)
 - **Week 2:** A4 + C1-C5 (integration), D1-D3 in parallel
 - **Week 3:** C6 + first training runs, D4-D7 evaluation
+- **Week 4:** D8 listening test (needs generated samples from Week 3)
 
 ---
 
@@ -1010,6 +1086,6 @@ cpt_micro = cpt_model.decoder_embedding.weight[8487:9675]  # 1188 microtonal
 | `generation.py` | Float buffer (line 148, 152) | D1 |
 | `data_preprocess.py` | Point at SymbTr, microtonal tokenizer | A2 |
 | `augment_53tet.py` | NEW script for transposition augmentation | A3 |
-| `evaluate_microtonal.py` | NEW script for all evaluation metrics | D4-D7 |
+| `evaluate_microtonal.py` | NEW script for all evaluation metrics | D4-D8 |
 | `lakh_dataset.py` | Minimal or no changes (data format is .npy) | — |
 | `concatenator.py` | No changes (stores Python lists, no dtype forcing) | — |
