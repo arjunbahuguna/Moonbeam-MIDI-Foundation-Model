@@ -113,12 +113,16 @@ This means we need **two pitch representations** flowing through the model:
 ```
 ╔══════════════════════════════════════════════════════════════════════════╗
 ║                     MOONBEAM — COMPLETE DATA FLOW                      ║
-║          Two independent paths: Transformer (floats) + GRU (ints)      ║
+║     Two REPRESENTATIONS but COUPLED paths: Transformer → GRU → loop   ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
-  Dataset outputs TWO independent tensors:
-    input_ids  (batch, seq_len, 6)  →  PATH 1 (Transformer)
-    labels     (batch, seq_len, 7)  →  PATH 2 (GRU decoder)
+  Dataset outputs two tensors (coupled during inference via autoregressive loop):
+    input_ids  (batch, seq_len, 6)  →  Transformer input (compound tokens with floats)
+    labels     (batch, seq_len, 7)  →  GRU decoder targets (language token IDs)
+
+  ⚠ IMPORTANT: During TRAINING, these are separate (teacher forcing on both).
+  During INFERENCE, GRU output → convert_from_language_tokens → tokens buffer →
+  next transformer input. THE PATHS FORM A LOOP — resolution must be consistent!
 
 
 ───────────────── PATH 1: TRANSFORMER (continuous, accepts floats) ─────────────
@@ -159,7 +163,8 @@ This means we need **two pitch representations** flowing through the model:
 
 ─────────────── PATH 2: GRU DECODER (discrete, integers only) ─────────────────
 
-  labels (batch, len, 7) — COMPLETELY INDEPENDENT from input_ids
+  labels (batch, len, 7) — separate tensor during TRAINING (teacher forcing)
+  ⚠ During INFERENCE: GRU output → language tokens → compound tokens → NEXT transformer input
        │
        ▼ shift by 1 position
        │
@@ -232,6 +237,22 @@ This means we need **two pitch representations** flowing through the model:
   Every value is an integer. No floats anywhere in the GRU path.
   pitch_id must then be converted BACK to fractional semitones
   for the next event's transformer input (see TODO 10).
+
+  ┌──────────────────── AUTOREGRESSIVE FEEDBACK LOOP ────────────────────┐
+  │                                                                      │
+  │  GRU 6-step output (all integer language token IDs)                  │
+  │       │                                                              │
+  │       ▼                                                              │
+  │  convert_from_language_tokens() → compound token (with float pitch)  │
+  │       │                                                              │
+  │       ▼                                                              │
+  │  tokens[:, cur_pos] = next_token  ←── STORED IN TOKEN BUFFER         │
+  │       │                                                              │
+  │       └───→ NEXT iteration: transformer input = tokens[:, prev:cur]  │
+  │             (generation.py line 218 → back to PATH 1)                │
+  └──────────────────────────────────────────────────────────────────────┘
+  ⚠ PATHS ARE COUPLED: GRU output becomes next transformer input!
+  ⚠ Resolution MUST be consistent across both paths (10-cent everywhere).
 ```
 
 ### 3.1 Key Insight: FME and RoPE Accept Floats Natively
@@ -383,7 +404,7 @@ batch['input_ids'][:, :, 3] = batch['input_ids'][:, :, 3] / 100.0  # cents → f
 
 **Option B: Convert in `__getitem__`** of the dataset class, so input_ids are already float when packed. Since the hybrid concatenator just stores Python lists (no dtype forcing), this also works.
 
-Either way, **labels stay as integers** — they go through a completely independent path to the GRU decoder.
+Either way, **labels stay as integers** — during training they go through the GRU decoder via teacher forcing. During inference, however, GRU output is converted back to compound tokens and fed to the next transformer step (autoregressive loop), so pitch resolution must be consistent across both paths.
 
 ### TODO 4: Modify `LakhDataset` (or create `MakamDataset`)
 - Load .npy with cents-based pitch (int)
@@ -509,10 +530,10 @@ Note: FME embeddings do NOT need regularization — they are a continuous functi
 | Loss | Impact | Rationale |
 |---|---|---|
 | **L_anchor** | **HIGH** | With only 3000 files / ~1.16M notes, catastrophic forgetting of western pitch embeddings is a real risk. L_anchor is our main defense alongside data mixing. Without it, the 12 pretrained western rows (8212-8223) could drift and break western generation entirely. |
-| **L_smooth** | **MEDIUM** | Helps with the empty bins problem (see Section 5.2). ~90% of 1200 cent bins are empty in SymbTr — L_smooth propagates gradient signal to neighboring untrained bins, preventing the GRU from generating "ghost" tokens with random embeddings. |
+| **L_smooth** | **HIGH** | Addresses the empty bins problem (Section 5.2) AND prevents **autoregressive error cascades** (Section 5.2.1). ~90% of 1200 cent bins are empty in SymbTr — L_smooth propagates gradient signal to neighboring untrained bins. Without it, ghost tokens during inference feed untrained fractional semitones back to the transformer, compounding errors across the sequence. |
 | **L_center** | **LOW** | Redundant with L_anchor for western pitches and overly constraining for microtonal ones. A segah (E−50 cents) should NOT be forced to stay close to E — it's a distinct pitch. If used at all, decay λ_c to 0 within the first 20-30% of training. |
 
-**Recommendation:** Always use L_anchor (λ_a ≈ 0.1-1.0). Use L_smooth (λ_s ≈ 0.01-0.1). Skip L_center or decay it rapidly.
+**Recommendation:** Always use L_anchor (λ_a ≈ 0.1-1.0). Always use L_smooth (λ_s ≈ 0.01-0.1) — essential for preventing autoregressive error cascades from ghost bins (Section 5.2.1). Skip L_center or decay it rapidly.
 
 #### 5f. CPT Schedule
 
@@ -713,6 +734,30 @@ Turkish makam pitches are NOT uniformly distributed across 1200 cents. They clus
 **The empty bins problem:** Turkish makam pitches cluster around ~30-50 attractor targets per octave (Holdrian commas). With 1-cent resolution (1200 bins), ~90% of bins will have ZERO training examples. This creates a concrete risk: during GRU inference, if the model samples an untrained bin, the `decoder_embedding` row for that bin was only ever initialized (by interpolation) and never updated by gradient — it may produce incoherent hidden states downstream.
 
 L_smooth regularization partially addresses this (propagates gradient to neighboring bins), but the fundamental sparsity remains.
+
+### 5.2.1 Autoregressive Error Cascades (Inference Only)
+
+The ghost bin problem is **worse than it appears** because of the coupled autoregressive loop (Section 3.0.1). During **inference** (NOT training — teacher forcing breaks the loop):
+
+```
+GRU samples ghost token (untrained bin, e.g., cent 37)
+    → convert_from_language_tokens → fractional semitone 0.37
+    → stored in tokens buffer
+    → NEXT iteration: transformer sees FME(0.37) as input
+    → decoder_embedding row for cent 37 was only initialized (interpolation), never gradient-updated
+    → transformer hidden state may be suboptimal
+    → summary_projection → GRU initial state is degraded
+    → NEXT GRU prediction is also less accurate
+    → ERROR COMPOUNDS ACROSS THE SEQUENCE
+```
+
+During **training**, teacher forcing means the transformer always sees ground-truth `input_ids`, regardless of what the GRU predicts. So ghost bins are harmless during training — the model never "sees" its own mistakes. But during generation, errors propagate.
+
+**Implications:**
+1. **L_smooth is HIGH impact** (not MEDIUM) — it ensures ghost bin embeddings are reasonable, preventing cascade initiation
+2. **10-cent resolution** further reduces risk — fewer bins = fewer ghosts = fewer cascade opportunities
+3. **53-TET augmentation** helps by filling empty bins with real training signal
+4. The **gap between teacher-forced and autoregressive pitch accuracy** directly measures this cascade effect (see Section 8.2)
 
 **Resolution comparison:**
 
@@ -1030,11 +1075,19 @@ Total: ~22 lines of changes. The inference pipeline is structurally identical to
 | **L_anchor regularization** | **HIGH** | With only ~1.16M notes vs 18B pretrained, western embeddings will drift. L_anchor is essential alongside data mixing. |
 | **Data mixing (α ≈ 0.7-0.9)** | **HIGH** | Prevents catastrophic forgetting. Small dataset makes this especially important. |
 | **Per-parameter learning rates** | **MEDIUM** | New rows (8487+) need faster learning than pretrained rows. Practical impact on convergence speed. |
-| **L_smooth regularization** | **MEDIUM** | Addresses empty bins — propagates gradients to untrained neighbors. Impact depends on resolution choice. |
+| **L_smooth regularization** | **HIGH** | Addresses empty bins — propagates gradients to untrained neighbors. During inference, ghost bins cause **error cascades** through the autoregressive loop (GRU ghost token → bad fractional semitone → bad transformer hidden state → next GRU also wrong). L_smooth is the main defense. |
 | **Resolution choice (1 vs 10 cent)** | **MEDIUM** | 10-cent dramatically reduces empty bins and decoder size with minimal precision loss. Worth investigating. |
 | **L_center regularization** | **LOW** | Overly constraining — microtonal pitches should be free to move away from western anchors. Skip or decay fast. |
 | **Initialization choice (interp vs copy)** | **LOW** | Both start close enough to pretrained manifold. Model overwrites initial values quickly during CPT. |
 | **Microtonal-axis initialization** | **LOW** | Added complexity, minimal benefit since FME already captures continuous pitch geometry on input side. |
+
+### 7.1 Paper Contribution: Coupled Autoregressive Architecture Analysis
+
+A key methodological contribution of this work is the analysis of Moonbeam's **coupled transformer-GRU autoregressive loop** and its implications for continual pretraining:
+
+> We identify that Moonbeam's causal transformer and GRU decoder are not independent paths — during inference, GRU output is converted back to compound tokens and fed as the next transformer input, forming a coupled autoregressive loop. This coupling constrains microtonal pitch representation: (1) resolution must be consistent across both paths, (2) errors in the GRU decoder cascade through the transformer, and (3) the gap between teacher-forced and autoregressive accuracy directly measures cascade severity. We propose L_smooth regularization and 10-cent resolution as defenses, validated by the TF-AR accuracy gap metric.
+
+This insight is non-trivial because Moonbeam's architecture (transformer + GRU decoder) superficially resembles an encoder-decoder model, but the causal transformer with KV cache + autoregressive feedback loop makes it fundamentally different.
 
 ---
 
@@ -1069,6 +1122,32 @@ Pitch accuracy (step 4) is the most informative — it directly measures whether
 - **Microtonal pitch accuracy**: accuracy on events with non-western cent values
 - This split reveals whether the model learned microtonal pitches WITHOUT forgetting western ones
 
+### 8.2.1 Autoregressive vs Teacher-Forced Accuracy Gap (Error Cascade Metric)
+
+Because Moonbeam's inference loop is coupled (GRU output → transformer input, see Section 3.0.1), errors compound during autoregressive generation but NOT during teacher-forced evaluation. The gap between these two metrics directly measures cascade severity:
+
+```python
+# 1. Teacher-forced accuracy (standard eval — no coupling):
+#    Feed ground-truth input_ids to transformer, measure GRU pitch accuracy
+tf_pitch_acc = eval_teacher_forced(model, test_set)  # e.g., 85%
+
+# 2. Autoregressive accuracy (real generation — full coupling):
+#    Generate from prompt, compare to ground-truth continuation
+ar_pitch_acc = eval_autoregressive(model, test_set, prompt_len=16)  # e.g., 72%
+
+# 3. The gap reveals coupling-induced error accumulation:
+cascade_gap = tf_pitch_acc - ar_pitch_acc  # e.g., 13%
+
+# 4. Accuracy vs sequence position (does it degrade over time?):
+for pos in [1, 5, 10, 20, 50]:
+    acc_at_pos = eval_autoregressive_at_position(model, test_set, gen_position=pos)
+    # Expected: accuracy degrades as generation gets longer (errors compound)
+```
+
+**Why this matters:** A small gap means the model's GRU predictions are reliable enough that feeding them back doesn't hurt — ghost bins aren't causing cascades. A large gap signals that L_smooth / resolution / augmentation need strengthening.
+
+**This is a paper-worthy metric** — it reveals something specific to Moonbeam's coupled architecture that standard perplexity doesn't capture.
+
 ### 8.3 Western Performance — Catastrophic Forgetting
 
 **Perplexity comparison:** Evaluate pretrained Moonbeam AND CPT model on the same **western validation set** (subset of Lakh Dataset held out during CPT). Report:
@@ -1086,10 +1165,11 @@ Running the CPT model on these SAME benchmarks quantifies forgetting on actual t
 
 ### 8.4 Generated Music Analysis
 
-**Ghost bin rate (empty bins problem):**
+**Ghost bin rate (empty bins problem — inference only):**
 - Generate N pieces (e.g., 100-500) autoregressively
 - Count the fraction of generated pitch tokens that fall in cent bins with ZERO training examples
-- High ghost bin rate → the GRU is sampling untrained tokens → motivates tighter resolution or GMM zones
+- High ghost bin rate → the GRU is sampling untrained tokens → causes autoregressive error cascades (Section 5.2.1) → motivates tighter resolution, stronger L_smooth, or GMM zones
+- Note: ghost bins are harmless during training (teacher forcing breaks the loop), but critical during generation
 
 **Generated pitch distribution vs corpus:**
 - For each pitch class, plot histogram of generated cent offsets vs SymbTr training distribution
@@ -1120,17 +1200,20 @@ Running the CPT model on these SAME benchmarks quantifies forgetting on actual t
 
 ### 8.7 Ablation Table Design
 
-| Configuration | SymbTr PPL | Pitch Acc (micro) | Pitch Acc (western) | Western PPL Δ | Ghost Bin % |
-|---|---|---|---|---|---|
-| Moonbeam pretrained (no CPT) | — | — | baseline | 0 | — |
-| CPT, no regularization | ? | ? | ? | ? | ? |
-| CPT + L_anchor only | ? | ? | ? | ? | ? |
-| CPT + L_anchor + L_smooth | ? | ? | ? | ? | ? |
-| CPT + L_anchor + L_smooth + data mixing | ? | ? | ? | ? | ? |
-| CPT, 10-cent resolution | ? | ? | ? | ? | ? |
-| CPT, 1-cent resolution | ? | ? | ? | ? | ? |
-| CPT, interpolation init | ? | ? | ? | ? | ? |
-| CPT, copy+noise init | ? | ? | ? | ? | ? |
+| Configuration | SymbTr PPL | Pitch Acc (micro) | Pitch Acc (western) | Western PPL Δ | Ghost Bin % | TF-AR Gap |
+|---|---|---|---|---|---|---|
+| Moonbeam pretrained (no CPT) | — | — | baseline | 0 | — | — |
+| CPT, no regularization | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor only | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor + L_smooth | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor + L_smooth + data mixing | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor + L_smooth + data mixing + 53-TET aug | ? | ? | ? | ? | ? | ? |
+| CPT, 10-cent resolution | ? | ? | ? | ? | ? | ? |
+| CPT, 1-cent resolution | ? | ? | ? | ? | ? | ? |
+| CPT, interpolation init | ? | ? | ? | ? | ? | ? |
+| CPT, copy+noise init | ? | ? | ? | ? | ? | ? |
+
+**TF-AR Gap** = teacher-forced pitch accuracy minus autoregressive pitch accuracy (Section 8.2.1). Measures coupling-induced error cascades. Small gap = ghost bins aren't causing problems. Large gap = need stronger L_smooth / coarser resolution / more augmentation.
 
 Rows can be combined — the key ablation axes are: (1) regularization, (2) resolution, (3) initialization. Data mixing and L_anchor should be in all non-baseline runs.
 

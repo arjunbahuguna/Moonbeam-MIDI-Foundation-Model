@@ -16,9 +16,10 @@ A2. SymbTr preprocess    B2. modeling_llama bugfixes     C1b. LoRA + training st
 A3. 53-TET augmentation  B3. Append-only pitch_dict      C2. Float pitch in loop    D3. compound_to_midi pitchbend
 A4. Western replay data  B4. convert_to/from_lang_tokens C3. L_anchor reg.          D4. Evaluation script
                          B5. Weight transfer code        C3b. L_smooth reg.          D4b. Ablation table
-                                                         C4. Per-param LR groups    D5. Eval: western forgetting
-                                                         C5. Data mixing logic      D6. Eval: embedding viz
-                                                         C6. GRU accuracy logging   D7. Eval: makam-specific
+                                                         C4. Per-param LR groups    D4c. TF-AR accuracy gap
+                                                         C5. Data mixing logic      D5. Eval: western forgetting
+                                                         C6. GRU accuracy logging   D6. Eval: embedding viz
+                                                                                    D7. Eval: makam-specific
                                                                                     D8. Eval: listening test
 
                          ┌──────────────────────────────────────────────────────────┐
@@ -558,7 +559,9 @@ if getattr(train_config, 'microtonal', False):
     batch['input_ids'][:, :, 3] = batch['input_ids'][:, :, 3] / 100.0  # cents → fractional semitones
     # onset/dur/octave/velocity: FME handles float ints (0.0, 1.0, ...) identically to ints
     # instrument: .long() cast is inside embed_tokens (B2 fix)
-# labels stay as integers — they go through the GRU decoder path independently
+# labels stay as integers during TRAINING (teacher forcing).
+# During INFERENCE, GRU output → compound tokens → next transformer input (coupled loop).
+# Pitch resolution must be consistent across both paths.
 ```
 
 **Why this works:**
@@ -628,7 +631,7 @@ L_smooth = lambda_smooth * L_smooth / max(len(micro_ids) - 1, 1)
 loss = loss + L_anchor + L_smooth
 ```
 
-**Impact: MEDIUM** — propagates gradient signal to untrained bins, prevents GRU from generating "ghost" tokens with random embeddings. More important with 1-cent resolution than 10-cent.
+**Impact: HIGH** — propagates gradient signal to untrained bins. During inference, ghost bins cause **autoregressive error cascades**: GRU samples untrained token → converts to untrained fractional semitone → fed back to transformer → bad hidden state → next GRU prediction also degraded → cascade. L_smooth ensures even untrained bins have reasonable embeddings, preventing this chain reaction. (Note: during training, teacher forcing breaks the loop, so ghost bins are harmless — but inference is what matters for generation quality.)
 
 **Acceptance:** Embedding distances between adjacent cent bins are correlated with cent distance.
 
@@ -898,21 +901,59 @@ ghost_rate = count(generated_pitch in empty_bins) / count(all_generated_pitches)
 
 Run ablations across these axes once baseline CPT works:
 
-| Configuration | SymbTr PPL | Pitch Acc (micro) | Pitch Acc (western) | Western PPL Δ | Ghost Bin % |
-|---|---|---|---|---|---|
-| Moonbeam pretrained (no CPT) | — | — | baseline | 0 | — |
-| CPT, no regularization | ? | ? | ? | ? | ? |
-| CPT + L_anchor only | ? | ? | ? | ? | ? |
-| CPT + L_anchor + data mixing | ? | ? | ? | ? | ? |
-| CPT + L_anchor + L_smooth + data mixing | ? | ? | ? | ? | ? |
-| CPT + L_anchor + L_smooth + data mixing + 53-TET aug | ? | ? | ? | ? | ? |
-| CPT, interpolation init (default) | ? | ? | ? | ? | ? |
-| CPT, copy+noise init | ? | ? | ? | ? | ? |
-| CPT, 1-cent resolution (default) | ? | ? | ? | ? | ? |
-| CPT, 10-cent resolution | ? | ? | ? | ? | ? |
+| Configuration | SymbTr PPL | Pitch Acc (micro) | Pitch Acc (western) | Western PPL Δ | Ghost Bin % | TF-AR Gap |
+|---|---|---|---|---|---|---|
+| Moonbeam pretrained (no CPT) | — | — | baseline | 0 | — | — |
+| CPT, no regularization | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor only | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor + data mixing | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor + L_smooth + data mixing | ? | ? | ? | ? | ? | ? |
+| CPT + L_anchor + L_smooth + data mixing + 53-TET aug | ? | ? | ? | ? | ? | ? |
+| CPT, interpolation init (default) | ? | ? | ? | ? | ? | ? |
+| CPT, copy+noise init | ? | ? | ? | ? | ? | ? |
+| CPT, 1-cent resolution (default) | ? | ? | ? | ? | ? | ? |
+| CPT, 10-cent resolution | ? | ? | ? | ? | ? | ? |
+
+**TF-AR Gap** = teacher-forced pitch accuracy minus autoregressive pitch accuracy (see D4c). Measures error cascade severity from the coupled inference loop.
 
 **Key ablation axes:** (1) regularization, (2) data augmentation, (3) initialization, (4) resolution.
 L_anchor + data mixing should be in all non-baseline runs.
+
+---
+
+### D4c. Autoregressive vs Teacher-Forced Accuracy Gap
+
+**Owner:** ___
+**Files:** In `evaluate_microtonal.py`
+**Blocked by:** D4
+
+Because Moonbeam's inference loop is coupled (GRU output feeds back to the transformer — see architecture diagram), errors compound during autoregressive generation but NOT during teacher-forced evaluation. The gap between these two directly measures cascade severity:
+
+```python
+# 1. Teacher-forced pitch accuracy (standard eval — no coupling):
+#    Ground-truth input_ids go to transformer; measure GRU pitch prediction accuracy
+tf_pitch_acc = eval_teacher_forced(model, test_set)
+
+# 2. Autoregressive pitch accuracy (real generation — full coupling):
+#    Generate from prompt prefix, compare generated pitches to ground-truth continuation
+ar_pitch_acc = eval_autoregressive(model, test_set, prompt_len=16)
+
+# 3. Cascade gap:
+cascade_gap = tf_pitch_acc - ar_pitch_acc
+
+# 4. Accuracy vs generation position (does it degrade over time?):
+for pos in [1, 5, 10, 20, 50]:
+    acc_at_pos = eval_autoregressive_at_position(model, test_set, gen_position=pos)
+    # Plot: x=position, y=accuracy — slope reveals cascade rate
+```
+
+**Why this matters:**
+- Small gap → GRU predictions are reliable, ghost bins don't cascade
+- Large gap → need stronger L_smooth / coarser resolution / more augmentation
+- Accuracy-vs-position plot shows whether errors compound or stabilize — a key insight for Moonbeam's coupled architecture
+- **Paper contribution**: this metric is specific to Moonbeam's transformer-GRU loop and reveals something standard perplexity doesn't
+
+**Acceptance:** TF-AR gap computed for all ablation runs. Accuracy-vs-position plot generated.
 
 ---
 
