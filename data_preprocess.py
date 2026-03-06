@@ -15,6 +15,33 @@ from sklearn.model_selection import train_test_split
 import pandas as pd
 num_cores = multiprocessing.cpu_count()
 
+
+def parse_symbtr_labels(filename):
+    """Parse SymbTr filename fields: [makam]--[form]--[usul]--[title]--[artist].
+
+    Works on bare filenames (with or without directory and extension).
+    Returns a dict with keys: makam, form, usul, title, artist.
+    If the filename does not match the expected 5-field pattern, all values
+    are empty strings so the caller can still write the CSV row.
+
+    SymbTr examples:
+      acemasiran--agirsemai--senginsemai--ey_lebleri--dede_efendi.mid
+      acemasiran--pesrev--devrikebir----dede_salih_efendi.mid  (empty title)
+      acemasiran--aranagme--sofyan--1--.mid                   (empty artist)
+    """
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    # Split into at most 5 parts; 4 '--' separators define the 5 fields.
+    parts = stem.split('--', 4)
+    if len(parts) == 5:
+        return {
+            'makam':  parts[0],
+            'form':   parts[1],
+            'usul':   parts[2],
+            'title':  parts[3],
+            'artist': parts[4],
+        }
+    return {'makam': '', 'form': '', 'usul': '', 'title': '', 'artist': ''}
+
 def chunk_compounds(compounds, threshold=1024):
     """chunk the compounds such that long silences in between are not treated as long timeshifts"""
 
@@ -127,18 +154,22 @@ def filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, du
 def process_midi_file_v2(midi_file, split, onset_vocab_size, dur_vocab_size, output_folder, log_file, silence_threshold = None):
     #convert midi to compounds
     compounds = tokenizer.midi_to_compound(midi_file)
-    output_file_name = midi_file.replace("/", "_").replace(".midi", ".npy").replace(".mid", ".npy") #TODO: this will avoid duplicates
-    output_file_path = os.path.join(output_folder, output_file_name)
-    if silence_threshold: #split compounds if timeshift exceeds threshold
+    # Use only the base filename, change extension to .npy
+    base_filename = os.path.splitext(os.path.basename(midi_file))[0] + ".npy"
+    output_file_path = os.path.join(output_folder, base_filename)
+    if silence_threshold:
         list_of_compounds = chunk_compounds(compounds, threshold=silence_threshold)
-        if len(list_of_compounds)==1:
+        if len(list_of_compounds) == 1:
             return [filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file)]
         else:
-            list_of_output_file_path = [os.path.join(output_folder, 
-                                                     midi_file.split("/")[-1].replace('.midi', f'_{i}.npy').replace('.mid', f'_{i}.npy')) 
-                                                     for i in range(len(list_of_compounds))]
-            return [filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file) for (compounds, output_file_path) in zip(list_of_compounds, list_of_output_file_path)]
-    else: 
+            # For chunked files, append _{i} to the base filename
+            list_of_output_file_path = [
+                os.path.join(output_folder, os.path.splitext(os.path.basename(midi_file))[0] + f'_{i}.npy')
+                for i in range(len(list_of_compounds))
+            ]
+            return [filter_large_ts_dur(comp, out_path, split, onset_vocab_size, dur_vocab_size, log_file)
+                    for (comp, out_path) in zip(list_of_compounds, list_of_output_file_path)]
+    else:
         return [filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file)]
 
 def analyze(processed_midis):
@@ -203,6 +234,11 @@ if __name__ == '__main__':
     parser.add_argument('--train_test_split_file', type=lambda x: None if x == "None" else str(x), help='Path to the split file.')
     parser.add_argument('--train_ratio', type=float, help='Training/Total')
     parser.add_argument('--ts_threshold', type=lambda x: None if x == "None" else int(x), help='If Timeshift exceeds this value, chunk the file')
+    parser.add_argument('--microtonal', action='store_true',
+                        help='Enable microtonal tokenization (required for SymbTr / pitchbend-aware data). '
+                             'Tokenizer will track pitchwheel messages and encode pitch as cents (0-1199).')
+    parser.add_argument('--pitchbend_sensitivity', type=float, default=2.0,
+                        help='Pitchbend range in semitones (default: 2.0, matches SymbTr convention).')
 
     args = parser.parse_args()
 
@@ -236,6 +272,10 @@ if __name__ == '__main__':
             splits = ['train'] * len(train_files) + ['test'] * len(test_files)
             midi_files = train_files + test_files
 
+    # Pre-compute SymbTr metadata labels for every file.  For non-SymbTr
+    # datasets the helper returns empty strings, keeping the CSV generic.
+    file_labels = [parse_symbtr_labels(os.path.basename(f)) for f in midi_files]
+
     #determine vocab size
     with open(args.model_config, 'r') as file:
         data = json.load(file)
@@ -247,24 +287,61 @@ if __name__ == '__main__':
         velocity_vocab_size = data.get("velocity_vocab_size", None)
         assert onset_vocab_size and dur_vocab_size
     print(f"processing using {num_cores} cpus. tokenizer config: max timeshift allowed: {onset_vocab_size-3}, max duration allowed: {dur_vocab_size-3}")
-    tokenizer = MusicTokenizer(timeshift_vocab_size = onset_vocab_size, dur_vocab_size = dur_vocab_size, octave_vocab_size = octave_vocab_size, pitch_class_vocab_size = pitch_class_vocab_size, instrument_vocab_size = instrument_vocab_size, velocity_vocab_size = velocity_vocab_size)  
+    if args.microtonal:
+        print(f"Microtonal mode ENABLED (pitchbend_sensitivity={args.pitchbend_sensitivity}). "
+              f"Pitch will be encoded as cents (0-1199); pitch_class_vocab_size={pitch_class_vocab_size}.")
+    tokenizer = MusicTokenizer(
+        timeshift_vocab_size=onset_vocab_size,
+        dur_vocab_size=dur_vocab_size,
+        octave_vocab_size=octave_vocab_size,
+        pitch_class_vocab_size=pitch_class_vocab_size,
+        instrument_vocab_size=instrument_vocab_size,
+        velocity_vocab_size=velocity_vocab_size,
+        microtonal=args.microtonal,
+        pitchbend_sensitivity=args.pitchbend_sensitivity,
+    )
 
     # Open the CSV file for writing directly
     with open(csv_file_path, 'w', newline='') as csvfile:
         csv_writer = csv.writer(csvfile)
-        csv_writer.writerow(['file_base_name', 'split', 'length', 'duration'])  # Write the header
+        # Header includes SymbTr metadata columns; non-SymbTr rows will have
+        # empty strings for those columns.
+        csv_writer.writerow([
+            'file_base_name', 'split', 'length', 'duration',
+            'makam', 'form', 'usul', 'title', 'artist',
+        ])
 
-        # Process all MIDI files
+        # Collect all results first so we can zip them with file_labels
+        # (executor.map preserves input order; each entry is a list of chunks).
         with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            for result in tqdm(
-                executor.map(process_midi_file_safe_v2, midi_files, splits, [onset_vocab_size] * len(midi_files), [dur_vocab_size] * len(midi_files), [midi_output_folder] * len(midi_files), [log_file] * len(midi_files), [args.ts_threshold] * len(midi_files)),
+            all_results = list(tqdm(
+                executor.map(
+                    process_midi_file_safe_v2,
+                    midi_files, splits,
+                    [onset_vocab_size] * len(midi_files),
+                    [dur_vocab_size]   * len(midi_files),
+                    [midi_output_folder] * len(midi_files),
+                    [log_file]         * len(midi_files),
+                    [args.ts_threshold] * len(midi_files),
+                ),
                 total=len(midi_files),
-                desc="Processing MIDI files"
-            ):
-                if result is not None:  # Only process successful results
-                    for sublist in result:  # Handle nested results
-                        if sublist is not None:
-                            # Write each result directly to the CSV
-                            csv_writer.writerow([os.path.basename(sublist['file']), sublist['split'], sublist['length_token'], sublist['length_duration']])
+                desc="Processing MIDI files",
+            ))
+
+        for labels_dict, result in zip(file_labels, all_results):
+            if result is not None:  # Only process successful results
+                for sublist in result:  # Handle nested results (chunked files)
+                    if sublist is not None:
+                        csv_writer.writerow([
+                            os.path.basename(sublist['file']),
+                            sublist['split'],
+                            sublist['length_token'],
+                            sublist['length_duration'],
+                            labels_dict['makam'],
+                            labels_dict['form'],
+                            labels_dict['usul'],
+                            labels_dict['title'],
+                            labels_dict['artist'],
+                        ])
 
     print(f'Processed {len(midi_files)} files. Results saved to {csv_file_path}, with {pd.read_csv(csv_file_path).shape[0]} successes. Success ratio: {pd.read_csv(csv_file_path).shape[0]/len(midi_files)* 100:.2f}%')
