@@ -42,6 +42,15 @@ class lakhmidi_dataset:
     csv_file: str = "/PATH/TO/CSV"
 
 @dataclass
+class symbtr_dataset:
+    dataset: str = "symbtr_dataset"
+    train_split: str = "train"
+    test_split: str = "test"
+    data_dir: str = "/PATH/TO/DATA/DIR"
+    csv_file: str = "/PATH/TO/CSV"
+    return_conditioning: bool = False
+
+@dataclass
 class merge_dataset:
     dataset: str = "merge_dataset"
     train_split: str = "train"

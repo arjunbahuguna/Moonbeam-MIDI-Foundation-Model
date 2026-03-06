@@ -12,3 +12,19 @@ src/llama_recipes/transformers_minimal/src/transformers/models/encoder_decoder/_
 src/llama_recipes/transformers_minimal/src/transformers/quantizers/__pycache__/
 src/llama_recipes/transformers_minimal/src/transformers/models/auto/__pycache__/
 src/llama_recipes/transformers_minimal/src/transformers.egg-info/
+
+# Datasets and data-processing files
+data/
+processed_data/
+_validate_a2.py
+plans/
+val_file.py
+__pycache__/
+models/
+processed_datasets/
+src/llama_recipes/configs/__pycache__/
+src/llama_recipes/datasets/grammar_dataset/__pycache__/
+src/llama_recipes/model_checkpointing/__pycache__/
+src/llama_recipes/utils/__pycache__/
+tests/__pycache__/
+wandb/

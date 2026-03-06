@@ -94,7 +94,7 @@ class MusicTokenizer():
                             self.dur_vocab_size + self.octave_vocab_size)
             # pitch_offset = 8212 for default config
             original_decode_vocab = pitch_offset + self._original_pitch_count + self.instrument_vocab_size + self.velocity_vocab_size
-            # original_decode_vocab = 8487
+            # original_decode_vocab = 8487 for moonbeam-M
 
             self.pitch_dict = {}
             micro_id = original_decode_vocab  # start appending at 8487
@@ -458,9 +458,9 @@ class MusicTokenizer():
 
                     if self.microtonal:
                         # Compute canonical pitch from MIDI note + current pitchbend
-                        bend_semitones = pitchbend_to_semitones(
+                        bend_semitones = pitchbend_to_semitones(   # Verify: distribution of negative and positive bends should match the dataset's pitchbend distribution. If not, there may be a bug in the bend_semitones calculation.
                             pitchbend_state[message.channel], self.pitchbend_sensitivity)
-                        canonical_pitch = message.note + bend_semitones
+                        canonical_pitch = message.note + bend_semitones # MIDI note is integer (60 for C4), bend_semitones is a float (-0.5 semitone for 2048 pitchbend value) ===> canonical_pitch is a float semitone value like 59.5
                         octave, pitch_class = pitch_to_octave_pitch_class_microtonal(canonical_pitch)
                     else:
                         octave, pitch_class = pitch_to_octave_pitch_class(message.note)
