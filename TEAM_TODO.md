@@ -192,6 +192,55 @@ Run these configurations to measure each component's contribution:
 | 4. No LoRA (full FT) | No | Yes | Yes | Yes | Yes | LoRA vs full |
 | 5. High replay | Yes | Yes (α=0.5) | Yes | Yes | Yes | Replay ratio sensitivity |
 
+### Training observations & known issues
+
+#### Data mixing: WeightedRandomSampler vs batch-level interleaving
+
+**Current approach:** `WeightedRandomSampler` with `mixing_alpha=0.8`. Each sample drawn
+independently — correct ratio in expectation over an epoch, but noisy per-batch (at
+batch_size=4: ~42% of batches have 0 western samples).
+
+**Alternative (future):** Batch-level interleaving — force consistent domain ratio per batch
+(e.g., always 3 micro + 1 western). Standard in large-scale LLM pretraining (GPT, LLaMA,
+Gemma, DoReMi). Gives stable gradients and cleaner per-step metrics.
+
+**Why we kept WeightedRandomSampler:**
+1. Moonbeam M pretraining used uniform random sampling (`MergeDataset` + `shuffle=True`)
+   across all 19 datasets in one directory — no domain weighting at all (paper Section 4.1).
+2. At our scale (~6500 steps), per-batch noise averages out. Batch-level interleaving
+   matters more at millions of steps.
+3. Eval loss (full SymbTr validation set) is unaffected by batch noise — it's the reliable metric.
+4. Implementation interacts with packing (ConcatDataset + collate_fn) — file-level ratio
+   doesn't guarantee token-level ratio within packed sequences.
+
+If scaling up: implement `DomainInterleavedBatchSampler` via `get_dataloader_kwargs`
+`batch_sampler` path (config_utils.py lines 83-91).
+
+#### GRU accuracy metrics drop when adding western replay — expected behavior
+
+Per-attribute GRU accuracy (timeshift, duration, octave, pitch, instrument, velocity) is
+computed on ALL tokens in the batch (modeling_llama.py line 1858). When western replay is
+added, ~47% of packed chunks are Maestro, and these tokens are included in the same metric.
+
+**Why accuracy drops on every attribute (not just pitch):**
+- `timeshift`: Maestro has chords (simultaneous notes, timeshift=0) + irregular gaps.
+  SymbTr is sequential/monophonic with regular rhythmic patterns — much easier.
+- `octave`: Maestro spans full piano range (octave 1-8). SymbTr concentrates in vocal/
+  instrument range (octave 4-6). More possible classes = lower accuracy.
+- `duration`: Maestro has varied articulations + sustain pedal. SymbTr has more uniform durations.
+- `instrument`: SymbTr is single instrument; Maestro is single instrument too (piano) but
+  the model sees different instrument IDs.
+- `pitch_western`: Drops from ~0.9 to ~0.3. Previously measured only on SymbTr's western-
+  semitone notes (easy, monophonic). Now includes Maestro polyphonic piano (much harder).
+- `pitch_micro`: ~0.6, relatively stable — only SymbTr contains microtonal notes.
+
+**The metrics don't mean the model got worse at SymbTr.** They mean Maestro tokens (harder to
+predict) are now included in the batch-level average. Only `pitch` has a domain-split metric
+(western vs micro). For other attributes, the number reflects a mix of both domains.
+
+**Primary metric to trust:** eval loss + eval perplexity (computed entirely on SymbTr
+validation set — no batch composition noise).
+
 ### Remaining work (for colleagues)
 
 #### Phase 1b: Training + evaluation (needs GPU)
