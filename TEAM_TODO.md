@@ -6,12 +6,12 @@
 
 ---
 
-## Implementation Status (updated 2026-03-05)
+## Implementation Status (updated 2026-03-07)
 
 | Task | Status | Notes |
 |------|--------|-------|
 | **A1.** Microtonal MIDI parsing | DONE | Helper functions + midi_to_compound in music_tokenizer.py |
-| **A2.** SymbTr data preprocessing | NOT STARTED | Needs SymbTr dataset + data_preprocess.py pointed at it |
+| **A2.** SymbTr data preprocessing | PARTIAL | data_preprocess.py has --microtonal flag + SymbTr label parsing; symbtr_dataset.py created; needs actual processing run |
 | **A3.** 53-TET augmentation | NOT STARTED | Needs A2 complete |
 | **A4.** Western replay data | NOT STARTED | Needs Lakh subset with pitch*100 conversion |
 | **B1.** Model config | DONE | model_config_microtonal.json created |
@@ -43,10 +43,12 @@
 | **D12.** Per-makam perplexity breakdown | NOT STARTED | Needs trained model + SymbTr metadata |
 | **D13.** Naive quantization baseline | NOT STARTED | Needs SymbTr data (A2); no arch changes |
 
-**Summary:** All model/tokenizer/training-loop code (B1-B5, C1-C4, C6, D1-D3) is DONE.
+**Summary:** All model/tokenizer/training-loop code (B1-B5, C1-C4, C6, D1-D3) is DONE. A2 partially done (preprocessing script + dataset class).
 **Test suite:** 57 unit tests in `tests/test_microtonal.py` (run: `python -m pytest tests/test_microtonal.py -v --noconftest`).
-Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D13).
-**Critical path:** A2 (SymbTr preprocessing) → A3 (augmentation) → C5 (mixing) → first training run → D4+ (evaluation).
+**Model variants:** Both S (309M, model_config_small_microtonal.json) and M (839M, model_config_microtonal.json) are supported. All offsets derived from config — no hardcoded model-specific values.
+**Resolution:** `microtonal_resolution` in JSON config (1=1-cent, 10=10-cent) controls tokenization grid end-to-end.
+Remaining: actual SymbTr processing run (A2), augmentation (A3), western replay data (A4), data mixing (C5), evaluation (D4-D13).
+**Critical path:** A2 processing run → A3 (augmentation) → A4 (western replay) → C5 (mixing) → first training run → D4+ (evaluation).
 
 ### Future: Conditional Generation (Phase 2+)
 
@@ -56,6 +58,8 @@ These are directly usable as metadata conditions via Moonbeam's existing conditi
 - **Phase 3a:** Makam scale degrees as temporal condition (between `<soc>`/`<eoc>`).
 - **Phase 3b:** Usul (rhythmic cycle) as temporal condition.
 - All phases depend on Phase 1 (CPT) being complete.
+- **Branching:** Create `microtonal_conditional` from `microtonal_cpt` (has all microtonal fixes), then port conditional infra from `conditional_gen_commu` branch. Do NOT branch from `conditional_gen_commu` (zero microtonal code there).
+- **Dataset:** `symbtr_dataset.py` already supports `return_conditioning=True` with makam/form/usul IDs parsed from filenames.
 
 ---
 

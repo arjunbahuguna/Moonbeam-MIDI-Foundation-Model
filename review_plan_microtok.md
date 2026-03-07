@@ -1,15 +1,52 @@
 # Microtonal Continual Pretraining for Moonbeam — Full Analysis & TODO
 
-> **Status (2026-03-05):** All model/tokenizer/training-loop code is IMPLEMENTED on `microtonal_cpt` branch
+> **Status (2026-03-07):** All model/tokenizer/training-loop code is IMPLEMENTED on `microtonal_cpt` branch
 > (streams B, C1-C4, C6, D1-D3). **57 unit tests passing** (`tests/test_microtonal.py`).
-> Remaining: data pipeline (A2-A4), data mixing (C5), evaluation (D4-D8).
-> See TEAM_TODO.md for detailed per-task status. Critical path: A2 (SymbTr preprocessing) → C5 (mixing) → first training run → evaluation.
+> Both model variants supported: S (309M, `model_config_small_microtonal.json`) and M (839M, `model_config_microtonal.json`).
+> All vocab offsets derived from JSON config — no hardcoded model-specific values.
+> `microtonal_resolution` (1-cent or 10-cent) is configurable end-to-end from JSON.
+> A2 partially done: `data_preprocess.py` has `--microtonal` flag + SymbTr label parsing; `symbtr_dataset.py` created and registered.
+> Remaining: actual SymbTr processing run (A2), augmentation (A3), western replay data prep (A4), data mixing code (C5), evaluation (D4-D13).
+> See TEAM_TODO.md for detailed per-task status.
+> **Critical path:** A2 run → A3 (augmentation) → A4 (western replay) → C5 (mixing) → first training run → D4+ (evaluation).
+> **Quick first run:** A2 run only → train on SymbTr alone (no augmentation/replay) to validate pipeline.
 >
 > **NOTE on Section 6.5.2 Change 2 below:** The original plan said `convert_from_language_tokens()` should
 > divide pitch by 100.0. This was CHANGED during implementation — `convert_from` now returns **integer cents**
 > (no division), and the single authoritative `/100.0` conversion happens in `embed_tokens` (modeling_llama.py
 > line 1437). This handles both training and inference paths uniformly. The prose in 6.5.2 is kept for
 > historical context but the ACTUAL implementation differs — see TEAM_TODO.md task D2.
+>
+> **UPDATE (2026-03-07 session 2): Deep review findings and fixes applied:**
+> 1. **BUG FIXED — MRA RoPE pitch positions (TODO 7 was WRONG):** `position_ids[:, :, 3]` fed raw cents
+>    (0-1199) to RoPE, 100x outside pretrained range (0-11). FME had `/100.0` normalization but RoPE did not.
+>    Fixed: `pitch_pos = pitch_pos.float() / 100.0` in `LlamaSdpaAttention.forward()` (modeling_llama.py:955-959).
+>    Western intervals now have identical RoPE rotations to pretraining; microtonal intervals interpolate naturally.
+> 2. **BUG FIXED — Missing `microtonal_resolution` in generation.py:** Inference tokenizer was created without
+>    `microtonal_resolution`, defaulting to 1-cent. Would silently produce wrong pitch_dict for 10-cent models.
+>    Fixed: added `microtonal_resolution=getattr(llama_config, 'microtonal_resolution', 1)` (generation.py:101).
+> 3. **CRITICAL — Stale site-packages installation:** The `transformers` and `moonbeam` (llama_recipes) packages
+>    were installed non-editable (`pip install`), so all source edits to `modeling_llama.py`, `music_tokenizer.py`,
+>    `train_utils.py`, `microtonal_utils.py`, `symbtr_dataset.py`, etc. were invisible to the running code.
+>    Additionally, `pip install` for transformers uses `build/lib/` (a stale build cache) instead of `src/`.
+>    Fixed by: (a) syncing `build/lib/` from `src/`, (b) reinstalling both packages.
+>    **IMPORTANT — after ANY edit to `modeling_llama.py`, you MUST:**
+>    ```bash
+>    cp src/llama_recipes/transformers_minimal/src/transformers/models/llama/modeling_llama.py \
+>       src/llama_recipes/transformers_minimal/build/lib/transformers/models/llama/modeling_llama.py
+>    pip install src/llama_recipes/transformers_minimal/.
+>    ```
+>    **After ANY edit to other `src/llama_recipes/` files, you MUST:**
+>    ```bash
+>    pip install .
+>    ```
+> 4. **10-cent L_smooth gaps (cosmetic, no fix needed):** At 10-cent resolution, L_smooth has 11 gaps at western
+>    semitone boundaries (e.g., cent 90 to 110, skipping western 100, gap=20 > threshold 10). By design —
+>    L_anchor handles western rows separately. At 1-cent resolution, zero gaps.
+> 5. **Mathematical verification passed (10 tests):** Pitch dict correctness, convert_to/from round-trip,
+>    FME range [0,11.99], RoPE normalization math, midi_to_compound edge cases, compound_to_midi round-trip,
+>    vocab expansion boundaries, float dict key lookup, octave boundary cases, L_smooth gap analysis.
+>    All PASS for both 1-cent and 10-cent resolutions.
 
 ## 1. Current State of the Codebase
 
@@ -340,14 +377,24 @@ Instead, append microtonal pitch IDs (non-western cent values) AFTER the origina
 
 ## 4. Detailed TODO List
 
-### TODO 1: Create new branch from `main`
+> **Implementation status key:** DONE, PARTIAL, NOT STARTED
+>
+> **Updates (2026-03-07):**
+> - All TODO 1-8d, 10 are DONE
+> - TODO 9 (data preprocessing) is PARTIAL — code ready, needs actual SymbTr processing run
+> - TODO 11 (GMM zones) is NOT STARTED — future improvement
+> - Both S and M model variants now supported via JSON config
+> - `microtonal_resolution` (1-cent/10-cent) fully configurable end-to-end
+> - All hardcoded M-model values (8487, 8212, etc.) removed; offsets derived from `tokenizer.pitch_offset` and `tokenizer.original_decode_vocab`
+
+### TODO 1: Create new branch from `main` — ✅ DONE
 ```bash
 git checkout main
 git checkout -b feat/microtonal_continual_pretrain
 ```
 Do NOT base on `feat/mtok_vocab` — it's 77 commits behind main and has wrong configs.
 
-### TODO 2: New model config — `model_config_microtonal_v2.json`
+### TODO 2: New model config — DONE
 ```json
 {
   // ... same as model_config.json EXCEPT:
@@ -362,7 +409,7 @@ Do NOT base on `feat/mtok_vocab` — it's 77 commits behind main and has wrong c
 }
 ```
 
-### TODO 3: Modify `MusicTokenizer` for fractional semitone input
+### TODO 3: Modify `MusicTokenizer` for fractional semitone input — DONE
 
 The tokenizer needs two representations for pitch:
 1. **`pitch_class_cents`** (int, 0-1199): for the GRU decoder language tokens
@@ -417,13 +464,13 @@ batch['input_ids'][:, :, 3] = batch['input_ids'][:, :, 3] / 100.0  # cents → f
 
 Either way, **labels stay as integers** — during training they go through the GRU decoder via teacher forcing. During inference, however, GRU output is converted back to compound tokens and fed to the next transformer step (autoregressive loop), so pitch resolution must be consistent across both paths.
 
-### TODO 4: Modify `LakhDataset` (or create `MakamDataset`)
+### TODO 4: Modify `LakhDataset` (or create `MakamDataset`) — DONE (symbtr_dataset.py)
 - Load .npy with cents-based pitch (int)
 - For `input_ids`: keep as int through concatenator, convert at training time
 - For `labels`: keep pitch as cents (int) → for GRU decoder language tokens
 - The `input_ids` tensor must support float (currently int for all western pitches)
 
-### TODO 5: Create continual pretraining script — `real_finetuning_microtonal.py`
+### TODO 5: Create continual pretraining script — DONE (`real_finetuning_microtonal.py`)
 Based on `real_finetuning_uncon_gen.py` from `main` branch. This script already:
 - Creates `LlamaForCausalLM` from config
 - Loads pretrained checkpoint with `strict=False` (handles missing/unexpected keys from vocab expansion)
@@ -565,7 +612,7 @@ param_groups = [
 ```
 New pitch rows (8487+) need ~3-10× higher LR than pretrained rows — they start from interpolation and must learn distinct microtonal representations. Pretrained rows should move slowly (L_anchor also helps here).
 
-### TODO 6: Fix `input_ids` tensor dtype for float pitch
+### TODO 6: Fix `input_ids` tensor dtype for float pitch — DONE
 
 **CRITICAL:** `instrument_embedding` uses `WordEmbedding` (line 1275-1284: wraps `nn.Embedding`) which requires `LongTensor`. All other embeddings (onset, dur, octave, pitch, velocity) use `FME` which accepts floats natively. If `input_ids` is passed as float for pitch, `instrument_embedding(input_ids_tmp[..., 4])` will crash.
 
@@ -584,7 +631,7 @@ instruments = self.instrument_embedding(input_ids_tmp[..., 4].long())
 
 Keep `input_ids` as float tensor (converted at training time, see TODO 3d). All FME embeddings handle float natively (onset, dur, octave, pitch, velocity). Only instrument (the sole `WordEmbedding` / `nn.Embedding`) needs the `.long()` cast.
 
-### TODO 6b: Fix position_ids dtype mismatch in attention — 3-LINE FIX
+### TODO 6b: Fix position_ids dtype mismatch in attention — DONE
 
 In `LlamaSdpaAttention.forward()` (modeling_llama.py lines 931-933), position_ids replacements use `.to(hidden_states.device)` which doesn't preserve dtype. If position_ids is float (because input_ids is float), `torch.where` will fail on dtype mismatch.
 
@@ -602,22 +649,41 @@ position_ids_eos = torch.where(where_classification, torch.tensor([2**15 + 1 for
 
 Note: `embed_tokens` line 1395 already uses `.to(input_ids)` — correct, no change needed there.
 
-### TODO 7: Verify `position_ids` for MRA — CONFIRMED OK
+### TODO 7: MRA RoPE pitch position normalization — FIXED (was WRONG, caught in 2026-03-07 deep review)
 
-In `LlamaSdpaAttention.forward()`:
+**Original analysis was INCORRECT.** It said "no code changes needed" — this was WRONG.
+
+**The problem:** `position_ids = input_ids` (line 1756), so `position_ids[:, :, 3]` receives raw compound
+pitch values. In microtonal mode, these are integer cents (0-1199), but during pretraining they were
+pitch classes (0-11). This is a 100x extrapolation of the RoPE position range.
+
+FME correctly normalizes via `pitch_input.float() / 100.0` in `embed_tokens` (line 1437-1440), but the
+MRA RoPE at line 955 received the raw cents without any normalization. With `rope_theta_pitch=20`:
+- Perfect fifth C->G pretrained: position 7, cos(7.0) = +0.754
+- Perfect fifth C->G microtonal (no fix): position 700, cos(700.0) = -0.841 (completely different!)
+- Perfect fifth C->G microtonal (with fix): position 7.0, cos(7.0) = +0.754 (identical to pretrained)
+
+**The fix (modeling_llama.py line 955-959):**
 ```python
-position_ids = input_ids  # line 1697
-cos_pitch, sin_pitch = self.rotary_emb_pitch(value_states, position_ids[:, :, 3])  # line 939
+pitch_pos = position_ids[:, :, 3]
+if getattr(self.config, 'microtonal', False):
+    # Cents (0-1199) -> fractional semitones (0.00-11.99) to match pretrained
+    # RoPE range (0-11) -> without this, LoRA must compensate for 100x extrapolation
+    pitch_pos = pitch_pos.float() / 100.0
+cos_pitch, sin_pitch = self.rotary_emb_pitch(value_states, pitch_pos)
 ```
 
-In `LlamaRotaryEmbedding.forward()` (line 108-122):
-```python
-position_ids_expanded = position_ids[:, None, :].float()  # line 112 — EXPLICIT float cast
-freqs = (inv_freq_expanded.float() @ position_ids_expanded.float())  # line 118 — float @ float
-```
+**Why `/100.0` works for BOTH resolutions:**
+- 1-cent: positions 0, 1, ..., 1199 -> 0.00, 0.01, ..., 11.99
+- 10-cent: positions 0, 10, ..., 1190 -> 0.00, 0.10, ..., 11.90
+- Western semitones map to exact integers in both cases (C=0.00, C#=1.00, ..., B=11.00)
 
-`position_ids[:, :, 3]` will be fractional semitones (0.0, 0.226, 1.0, 2.5, ...).
-**Verified: RoPE explicitly casts position_ids to float at line 112. No code changes needed.**
+**Why fractional RoPE positions are valid:** RoPE computes `cos(m * theta_i)` for any real m.
+`LlamaLinearScalingRotaryEmbedding` already uses fractional positions (`position_ids.float() / scaling_factor`).
+The float32 precision is ample for 0.01 granularity.
+
+**SOS/EOS unaffected:** Detected by onset column (`position_ids[..., 0] == sos_token`), their positions
+are overridden to [0,0,...] and [2^15,...] before reaching RoPE. The pitch value 1200/1201 is never used.
 
 ### TODO 8: Handle SOS/EOS detection with float pitch — CONFIRMED OK
 
@@ -839,22 +905,43 @@ Augmented:    3,000 × 53   =  159,000 files    =  ~61.5M notes  (53× increase!
 
 | Component | File | Change |
 |---|---|---|
-| Model config | `model_config_microtonal_v2.json` | NEW FILE — keep original bases, expand pitch vocab only |
-| Tokenizer | `music_tokenizer.py` | Port microtonal MIDI parsing from feat/mtok_vocab, add fractional semitone output |
-| Dataset class | `lakh_dataset.py` or new `makam_dataset.py` | Convert cents→fractional semitones for input_ids, keep cents for labels |
-| Training script | `real_finetuning_microtonal.py` | Copy from `real_finetuning_uncon_gen.py` (main), add vocab expansion + weight transfer + float conversion |
-| Data preprocessing | `data_preprocess.py` | Port microtonal support, keep onset/dur vocab=4099 |
-| Weight initialization | In training script | Interpolate new pitch decoder embeddings from pretrained western ones |
-| MIDI output | `compound_to_midi()` | Port from feat/mtok_vocab, adapt for fractional semitones |
+| Model config | `model_config_microtonal.json` + `model_config_small_microtonal.json` | Keep original bases, expand pitch vocab, add `microtonal_resolution` |
+| Tokenizer | `music_tokenizer.py` | Append-only pitch_dict, microtonal MIDI parsing, resolution-aware quantization |
+| Dataset class | `symbtr_dataset.py` (NEW) | SymbTr dataset with makam/form/usul conditioning support |
+| Training script | `real_finetuning_microtonal.py` | Vocab expansion, L_anchor/L_smooth, LoRA config, gradient scaling, warmup freeze |
+| Model forward | `modeling_llama.py` | (1) instrument `.long()`, (2) `.to(position_ids)` dtype, (3) FME `/100.0`, (4) RoPE pitch `/100.0` |
+| Training loop | `train_utils.py` | L_anchor + L_smooth application, warmup freeze gradient zeroing, GRU accuracy logging |
+| Data preprocessing | `data_preprocess.py` | `--microtonal` flag, SymbTr label parsing, `microtonal_resolution` from config |
+| Vocab init | `microtonal_utils.py` (NEW) | Interpolate new pitch decoder/lm_head rows from flanking western embeddings |
+| Inference | `generation.py` | Float32 token buffer, `microtonal_resolution` param |
+| MIDI output | `compound_to_midi()` | Pitchbend output for sub-semitone accuracy |
 
 ### Files that need MINIMAL changes:
-- `modeling_llama.py` — **2 small fixes**: (1) `.long()` cast on instrument column in `embed_tokens` (line 1437: `input_ids_tmp[..., 4].long()`), (2) `.to(position_ids)` instead of `.to(hidden_states.device)` in attention (lines 931-933)
-- `train_utils.py` → `train_con_gen()` — add `batch['input_ids'].float()` + `batch['input_ids'][:,:,3] /= 100.0` before `model(**batch)`, plus per-parameter optimizer groups
+- `modeling_llama.py` — **4 fixes**: (1) `.long()` cast on instrument column in `embed_tokens` (line 1447), (2) `.to(position_ids)` instead of `.to(hidden_states.device)` in attention (lines 940-941), (3) cents->fractional semitones `/100.0` in `embed_tokens` for FME (line 1445), (4) cents->fractional semitones `/100.0` for MRA RoPE pitch positions (lines 955-959, see TODO 7)
+- `train_utils.py` → `train_con_gen()` — L_anchor + L_smooth regularization, warmup freeze, per-attribute GRU accuracy logging
 - `real_finetuning_uncon_gen.py` → copy to `real_finetuning_microtonal.py`, add weight transfer step between checkpoint load and PEFT wrapping
+- `generation.py` — float32 token buffer, `microtonal_resolution` param to tokenizer
 
 ### Files that do NOT need changes:
 - `concatenator.py` — `ConcatDataset_hybrid_padding_concatenating` stores Python lists, no dtype issues
-- FME, MRA, GRU decoder architecture — all naturally handle floats
+- FME architecture — continuous sinusoidal, naturally handles fractional semitones
+- GRU decoder architecture — unchanged, just operates on expanded vocab
+
+### Package installation (IMPORTANT):
+The `transformers` and `moonbeam` packages are installed as non-editable copies. Source edits are
+NOT reflected until you reinstall. Additionally, `pip install` for `transformers` uses `build/lib/`
+(a build cache), NOT `src/`. After editing `modeling_llama.py`:
+```bash
+# Step 1: sync build cache from source
+cp src/llama_recipes/transformers_minimal/src/transformers/models/llama/modeling_llama.py \
+   src/llama_recipes/transformers_minimal/build/lib/transformers/models/llama/modeling_llama.py
+# Step 2: reinstall transformers
+pip install src/llama_recipes/transformers_minimal/.
+```
+After editing any `src/llama_recipes/` file:
+```bash
+pip install .
+```
 
 ### Weight transfer summary (verified — only 2 parameters change shape):
 | Parameter | Original Shape | New Shape | Transfer |
@@ -1298,6 +1385,18 @@ Moonbeam has a **unified conditional generation framework** (paper §3.3, finetu
 - Dataset: `commu_con_gen_dataset.py` — loads CoMMU data, prepends metadata + chord tokens
 - Inference: `recipes/inference/custom_music_generation/conditional_music_generation_batch.py` — batch generation with conditions
 - Tokenizer: `encode_series_con_gen_commu()` — constructs the full conditioned sequence
+
+**Key code on `conditional_gen_commu` branch (analyzed 2026-03-07):**
+- Model: `LlamaForCausalLM_Conditional_Generation` in `modeling_llama.py` — extends base class with chord/metadata handling in forward pass
+- Generation: `generation.py` rewritten (~450+ lines) for conditional inference with metadata + chord prefix construction
+- Data: `concatenator.py` (~315+ lines) — handles hybrid padding/concatenation with condition tokens
+- Inference: `conditional_music_generation.py` + batch generation scripts
+- **Zero microtonal code on this branch** — all conditioning is for western CoMMU data (chords, BPM, genre, etc.)
+
+**Branching strategy for Phase 2:**
+- Branch from `microtonal_cpt` (NOT from `conditional_gen_commu`), since `microtonal_cpt` has all 7+ critical fixes (FME /100.0, RoPE /100.0, .long(), .to(), vocab expansion, float buffer, etc.)
+- Cherry-pick/port the conditional generation infrastructure from `conditional_gen_commu` into the new branch
+- Adapt for SymbTr-specific conditions (makam metadata tokens, scale degrees, usul)
 
 ### 9.1 Phase 2: Makam as a Metadata Condition (simplest extension)
 
