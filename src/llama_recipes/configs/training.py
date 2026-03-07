@@ -61,7 +61,9 @@ class train_config:
     dist_checkpoint_folder: str="fine-tuned" # will be used if using FSDP
     save_optimizer: bool=False # will be used if using FSDP
     use_fast_kernels: bool = False # Enable using SDPA from PyTroch Accelerated Transformers, make use Flash Attention and Xformer memory-efficient kernels
+    pure_bf16: bool = False  # Convert model to bf16 (single-GPU; FSDP/DDP use their own configs)
     use_wandb: bool = False # Enable wandb for experient tracking
+    log_interval: int = 10  # Log to wandb every N training steps (reduces noise)
     save_metrics: bool = False # saves training metrics to a json file for later plotting
     flop_counter: bool = False # Enable flop counter to measure model throughput, can not be used with pytorch profiler at the same time.
     flop_counter_start: int = 3 # The step to start profiling, default is 3, which means after 3 steps of warmup stage, the profiler will start to count flops.

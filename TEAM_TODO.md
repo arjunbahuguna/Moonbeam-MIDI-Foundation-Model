@@ -131,7 +131,9 @@ pip install src/llama_recipes/transformers_minimal/.
 #    Save to e.g. ~/projects/microtok/checkpoints/moonbeam_pretrained.pt
 
 # 4. Train (single GPU, SymbTr only)
-torchrun --nnodes 1 --nproc_per_node 1 src/llama_recipes/real_finetuning_microtonal.py \
+# NOTE: Do NOT use --enable_ddp with single GPU — it disables WeightedRandomSampler
+#       (mixing_alpha would be ignored, falling back to uniform ~50/50 sampling)
+python src/llama_recipes/real_finetuning_microtonal.py \
   --lr 2e-5 \
   --weight_decay 0.01 \
   --val_batch_size 2 \
@@ -142,7 +144,6 @@ torchrun --nnodes 1 --nproc_per_node 1 src/llama_recipes/real_finetuning_microto
   --dist_checkpoint_folder ddp \
   --trained_checkpoint_path ~/projects/microtok/checkpoints/moonbeam_pretrained.pt \
   --pure_bf16 True \
-  --enable_ddp True \
   --use_peft True \
   --peft_method lora \
   --quantization False \
@@ -157,6 +158,7 @@ torchrun --nnodes 1 --nproc_per_node 1 src/llama_recipes/real_finetuning_microto
   --gradient_clipping True \
   --gradient_clipping_threshold 1.0 \
   --use_wandb True \
+  --log_interval 10 \
   --gamma 0.85
 ```
 

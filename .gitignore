@@ -15,6 +15,7 @@ src/llama_recipes/transformers_minimal/src/transformers.egg-info/
 
 # Datasets and data-processing files
 data/
+checkpoints/
 processed_data/
 _validate_a2.py
 plans/

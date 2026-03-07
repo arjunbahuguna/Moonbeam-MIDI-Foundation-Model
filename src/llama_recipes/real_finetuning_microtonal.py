@@ -188,7 +188,7 @@ def main(**kwargs):
     if getattr(llama_config, 'microtonal', False):
         # Direct references to the Parameter tensors — these survive PEFT/DDP wrapping
         # because wrappers delegate to the same underlying nn.Parameter objects.
-        decoder_emb_weight = model.model.decoder_embedding.weight
+        decoder_emb_weight = model.decoder_embedding.weight
         lm_head_weight = model.lm_head.weight
 
         # Western pitch rows in the flat GRU vocab: pitch_offset + pitch_class (0-11)
@@ -232,6 +232,7 @@ def main(**kwargs):
             'micro_pair_ids_right': torch.tensor(right_ids, dtype=torch.long),
             'lambda_anchor': 0.5,   # recommended range: [0.1, 1.0]
             'lambda_smooth': 0.05,  # recommended range: [0.01, 0.1]
+            'original_decode_vocab': original_decode_vocab,
         }
         print(f"Microtonal regularization: {len(western_ids)} western anchors, "
               f"{len(left_ids)} adjacent-bin pairs for smoothness")
@@ -240,11 +241,12 @@ def main(**kwargs):
     if train_config.quantization:
         model = prepare_model_for_kbit_training(model)
 
-    # Convert the model to bfloat16 if fsdp and pure_bf16 is enabled
+    # Convert the model to bfloat16 if pure_bf16 is enabled
     if train_config.enable_fsdp and fsdp_config.pure_bf16:
         model.to(torch.bfloat16)
-
-    if train_config.enable_ddp and ddp_config.pure_bf16:
+    elif train_config.enable_ddp and ddp_config.pure_bf16:
+        model.to(torch.bfloat16)
+    elif getattr(train_config, 'pure_bf16', False):
         model.to(torch.bfloat16)
 
     if train_config.use_peft:

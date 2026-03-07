@@ -713,6 +713,7 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                     with autocast():
                         loss = model(**batch).loss
                     # Microtonal embedding regularization (anchor + smoothness)
+                    ce_loss = loss.detach().float().item()
                     if microtonal_reg is not None:
                         reg = microtonal_reg
                         w_ids = reg['western_ids']
@@ -731,6 +732,7 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                         loss = loss + L_anchor + L_smooth
                         reg['_last_L_anchor'] = L_anchor.detach().float().item()
                         reg['_last_L_smooth'] = L_smooth.detach().float().item()
+                        reg['_last_ce_loss'] = ce_loss
                     loss = loss / gradient_accumulation_steps
                     if train_config.save_metrics:
                         train_step_loss.append(loss.detach().float().item())
@@ -752,9 +754,11 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                             if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                                 scaler.unscale_(optimizer)
                                 if train_config.enable_fsdp:
-                                    model.clip_grad_norm_(train_config.gradient_clipping_threshold)
+                                    grad_norm = model.clip_grad_norm_(train_config.gradient_clipping_threshold)
                                 else:
-                                    torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
+                                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
+                                if microtonal_reg is not None:
+                                    microtonal_reg['_last_grad_norm'] = float(grad_norm)
                             scaler.step(optimizer)
                             scaler.update()
                             optimizer.zero_grad()
@@ -774,9 +778,11 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                         if (step + 1) % gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
                             if train_config.gradient_clipping and train_config.gradient_clipping_threshold > 0.0:
                                 if train_config.enable_fsdp:
-                                    model.clip_grad_norm_(train_config.gradient_clipping_threshold)
+                                    grad_norm = model.clip_grad_norm_(train_config.gradient_clipping_threshold)
                                 else:
-                                    torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
+                                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.gradient_clipping_threshold)
+                                if microtonal_reg is not None:
+                                    microtonal_reg['_last_grad_norm'] = float(grad_norm)
                             optimizer.step()
                             optimizer.zero_grad()
                             pbar.update(1)
@@ -784,19 +790,35 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                         profile_context.step()
                     if train_config.flop_counter and profile_context.is_done():
                         TFlops = profile_context.get_flops_per_sec() / 1e12
-                    if wandb_run:
+                    if wandb_run and step % train_config.log_interval == 0:
                         if not train_config.enable_fsdp or rank==0:
                             log_dict = {
                                 'train/epoch': epoch + 1,
                                 'train/step': epoch * len(train_dataloader) + step,
                                 'train/loss': loss.detach().float(),
+                                'train/lr': optimizer.param_groups[0]['lr'],
                             }
-                            # Log regularization losses
+                            # Log regularization losses, diagnostics, and warmup freeze status
                             if microtonal_reg is not None:
+                                if '_last_ce_loss' in microtonal_reg:
+                                    log_dict['train/ce_loss'] = microtonal_reg['_last_ce_loss']
                                 if '_last_L_anchor' in microtonal_reg:
                                     log_dict['train/L_anchor'] = microtonal_reg['_last_L_anchor']
                                 if '_last_L_smooth' in microtonal_reg:
                                     log_dict['train/L_smooth'] = microtonal_reg['_last_L_smooth']
+                                if '_last_grad_norm' in microtonal_reg:
+                                    log_dict['train/grad_norm'] = microtonal_reg['_last_grad_norm']
+                                log_dict['train/warmup_freeze_active'] = int(
+                                    total_train_steps <= microtonal_reg.get('warmup_freeze_steps', 0))
+                                # Embedding drift: L2 distance from init for new micro rows
+                                reg = microtonal_reg
+                                with torch.no_grad():
+                                    orig_v = reg.get('original_decode_vocab')
+                                    if orig_v is not None:
+                                        micro_emb = reg['decoder_emb_weight'][orig_v:]
+                                        micro_head = reg['lm_head_weight'][orig_v:]
+                                        log_dict['train/micro_emb_norm'] = micro_emb.norm().item()
+                                        log_dict['train/micro_head_norm'] = micro_head.norm().item()
                             # Log per-attribute GRU decoder accuracy
                             inner_model = getattr(model, 'module', model)
                             if hasattr(inner_model, 'base_model'):
