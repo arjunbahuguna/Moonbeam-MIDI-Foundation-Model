@@ -146,6 +146,7 @@ def main(**kwargs):
             pad_token=llama_config.pad_token,
             microtonal=getattr(llama_config, 'microtonal', False),
             pitchbend_sensitivity=getattr(llama_config, 'pitchbend_sensitivity', 2.0),
+            microtonal_resolution=getattr(llama_config, 'microtonal_resolution', 1),
         )
 
         model = LlamaForCausalLM(llama_config)
@@ -181,7 +182,7 @@ def main(**kwargs):
 
     # Prepare microtonal embedding regularization:
     #   L_anchor — MSE penalty preventing the 12 pretrained western pitch embeddings
-    #              (rows 8212-8223 in decoder_embedding/lm_head) from drifting during CPT
+    #              (rows pitch_offset..pitch_offset+11 in decoder_embedding/lm_head) from drifting
     #   L_smooth — encourages adjacent cent-resolution pitch bins to have similar embeddings
     microtonal_reg = None
     if getattr(llama_config, 'microtonal', False):
@@ -191,8 +192,8 @@ def main(**kwargs):
         lm_head_weight = model.lm_head.weight
 
         # Western pitch rows in the flat GRU vocab: pitch_offset + pitch_class (0-11)
-        pitch_offset = (tokenizer.sos_out_vocab_size + tokenizer.timeshift_vocab_size +
-                        tokenizer.dur_vocab_size + tokenizer.octave_vocab_size)
+        pitch_offset = tokenizer.pitch_offset
+        original_decode_vocab = tokenizer.original_decode_vocab
         western_ids = list(range(pitch_offset, pitch_offset + 12))
 
         # Snapshot of pretrained western embeddings (anchor targets, never updated)
@@ -202,7 +203,7 @@ def main(**kwargs):
         # Build index tensors for vectorized L_smooth computation.
         # Each pair (left[i], right[i]) are adjacent cent bins within 10 cents of each other
         sorted_pitches = sorted(
-            [(c, lid) for c, lid in tokenizer.pitch_dict.items() if lid >= 8487],
+            [(c, lid) for c, lid in tokenizer.pitch_dict.items() if lid >= original_decode_vocab],
             key=lambda x: x[0]
         )
         left_ids, right_ids = [], []
@@ -214,7 +215,7 @@ def main(**kwargs):
                 right_ids.append(id2)
 
         # Regularization weights:
-        #   lambda_anchor: MSE penalty on western pitch embeddings (rows 8212-8223)
+        #   lambda_anchor: MSE penalty on western pitch embeddings
         #     drifting from pretrained values. Tune in [0.1, 1.0]. Higher = more
         #     conservative (less forgetting, slower microtonal adaptation).
         #   lambda_smooth: encourages adjacent cent bins to have similar embeddings.
@@ -404,11 +405,11 @@ def main(**kwargs):
         param_groups = [g for g in param_groups if g["params"]]
         optimizer = optim.AdamW(param_groups, weight_decay=train_config.weight_decay)
 
-        # Gradient scaling hook: new microtonal rows (8487+) in decoder_embedding and
+        # Gradient scaling hook: new microtonal rows in decoder_embedding and
         # lm_head get 3x effective LR relative to pretrained rows. This compensates for
         # the interpolation initialization being far from optimal, while pretrained rows
         # start near-optimal and are additionally stabilized by L_anchor.
-        original_decode_vocab = 8487
+        original_decode_vocab = tokenizer.original_decode_vocab
         scale_factor = 3.0
         def _make_row_scaling_hook(boundary, factor):
             def hook(grad):

@@ -1,26 +1,25 @@
 import torch
 
 
-def expand_vocab_with_interpolation(pretrained_state_dict, new_config, tokenizer, original_decode_vocab=8487):
+def expand_vocab_with_interpolation(pretrained_state_dict, new_config, tokenizer):
     """
     Expand decoder_embedding and lm_head from original_decode_vocab -> new_config.decode_vocab_size.
     First original_decode_vocab rows: direct copy from pretrained.
     Rows original_decode_vocab+: interpolated from flanking western semitone embeddings.
 
     Args:
-        pretrained_state_dict: state dict from pretrained checkpoint (original 8487 vocab)
-        new_config: LlamaConfig with expanded decode_vocab_size (e.g., 9675)
+        pretrained_state_dict: state dict from pretrained checkpoint
+        new_config: LlamaConfig with expanded decode_vocab_size
         tokenizer: MusicTokenizer instance with microtonal pitch_dict (append-only layout)
-        original_decode_vocab: original decode_vocab_size (default 8487)
 
     Returns:
         new state dict with expanded decoder_embedding and lm_head weights
     """
+    original_decode_vocab = tokenizer.original_decode_vocab
     reverse_pitch_dict = {v: k for k, v in tokenizer.pitch_dict.items()}
 
     # Row offset where western pitch classes (0-11) start in the flat GRU vocab
-    pitch_offset = (tokenizer.sos_out_vocab_size + tokenizer.timeshift_vocab_size +
-                    tokenizer.dur_vocab_size + tokenizer.octave_vocab_size)
+    pitch_offset = tokenizer.pitch_offset
 
     new_vocab_size = new_config.decode_vocab_size
 

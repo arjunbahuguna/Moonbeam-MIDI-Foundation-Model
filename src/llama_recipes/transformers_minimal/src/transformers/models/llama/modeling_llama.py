@@ -1849,13 +1849,17 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                                 ['timeshift', 'duration', 'octave', 'pitch', 'instrument', 'velocity'])
                         }
                         # Split pitch accuracy into western semitone vs microtonal bins
-                        # Pitch labels are at GRU step index 3; IDs 8212-8223 are the 12
-                        # western pitch classes, IDs >= 8487 are appended microtonal bins
+                        # Pitch labels are at GRU step index 3; offsets derived from config
                         if getattr(self.config, 'microtonal', False):
+                            _pitch_offset = (1 + self.config.onset_vocab_size +
+                                             self.config.dur_vocab_size + self.config.octave_vocab_size)
+                            _original_decode = (_pitch_offset + 14 +
+                                                self.config.instrument_vocab_size +
+                                                self.config.velocity_vocab_size)
                             labels_2d = shift_labels_x_y[:n_tokens * 6].view(n_tokens, 6)
                             pitch_labels = labels_2d[:, 3]
-                            is_western = (pitch_labels >= 8212) & (pitch_labels <= 8223)
-                            is_micro = pitch_labels >= 8487
+                            is_western = (pitch_labels >= _pitch_offset) & (pitch_labels <= _pitch_offset + 11)
+                            is_micro = pitch_labels >= _original_decode
                             if is_western.any():
                                 self._gru_acc['pitch_western'] = correct_2d[is_western, 3].float().mean().item()
                             if is_micro.any():

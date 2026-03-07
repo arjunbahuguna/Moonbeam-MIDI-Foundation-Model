@@ -46,7 +46,7 @@ def canonical_pitch_to_midi_and_pitchbend(canonical_pitch_semitones, sensitivity
 
 
 class MusicTokenizer():
-    def __init__(self, timeshift_vocab_size = 21, dur_vocab_size = 1001, octave_vocab_size = 9, pitch_class_vocab_size = 12, instrument_vocab_size = 128, velocity_vocab_size = 129, sos_token = -1, eos_token = -2, pad_token = -3, microtonal=False, pitchbend_sensitivity=2.0):
+    def __init__(self, timeshift_vocab_size = 21, dur_vocab_size = 1001, octave_vocab_size = 9, pitch_class_vocab_size = 12, instrument_vocab_size = 128, velocity_vocab_size = 129, sos_token = -1, eos_token = -2, pad_token = -3, microtonal=False, pitchbend_sensitivity=2.0, microtonal_resolution=1):
         self.timeshift_vocab_size = timeshift_vocab_size
         self.dur_vocab_size = dur_vocab_size
         self.octave_vocab_size = octave_vocab_size
@@ -57,6 +57,7 @@ class MusicTokenizer():
         self.sos_out = 0
         self.microtonal = microtonal
         self.pitchbend_sensitivity = pitchbend_sensitivity
+        self.microtonal_resolution = microtonal_resolution
 
         self.sos_token = sos_token
         self.eos_token = eos_token
@@ -71,7 +72,12 @@ class MusicTokenizer():
         # self.sos_dur, self.eos_dur = 1025, 1026 #TODO: very ugly fix!! #IF CONVERT TO LINEAR THEN HAVE TO CHANGE THIS BACK
 
         self.sos_octave, self.eos_octave = self.octave_vocab_size-2, self.octave_vocab_size-1
-        self.sos_pitch_class, self.eos_pitch_class = self.pitch_class_vocab_size-2, self.pitch_class_vocab_size-1
+        if self.microtonal:
+            # SOS/EOS pitch compound values are always 1200/1201 (special markers,
+            # not real cent values). For non-microtonal, they're pitch_class_vocab_size-2/-1
+            self.sos_pitch_class, self.eos_pitch_class = 1200, 1201
+        else:
+            self.sos_pitch_class, self.eos_pitch_class = self.pitch_class_vocab_size-2, self.pitch_class_vocab_size-1
         self.sos_instrument, self.eos_instrument = self.instrument_vocab_size-2, self.instrument_vocab_size-1
         self.sos_velocity, self.eos_velocity = self.velocity_vocab_size-2, self.velocity_vocab_size-1
 
@@ -85,39 +91,44 @@ class MusicTokenizer():
         self.duration_dict = {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size for i in range(self.dur_vocab_size)} #linear scale
         self.octave_dict = {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size+self.dur_vocab_size for i in range(self.octave_vocab_size)}
 
+        # Offsets derived from config, used by training scripts and model code
+        self._original_pitch_count = 14  # 12 chromatic pitches + SOS + EOS (pretrained constant)
+        self.pitch_offset = (self.sos_out_vocab_size + self.timeshift_vocab_size +
+                             self.dur_vocab_size + self.octave_vocab_size)
+        self.original_decode_vocab = (self.pitch_offset + self._original_pitch_count +
+                                      self.instrument_vocab_size + self.velocity_vocab_size)
+
         if self.microtonal:
-            # Append-only pitch_dict: western cents -> original IDs, microtonal -> appended after 8487
-            # For 10-cent ablation: change loop to iterate cent values 0,10,20,...,1190 instead of 0..1199.
-            # Use: `for idx in range(vocab_size - 2): c = idx * resolution` with SOS=1200, EOS=1201.
-            self._original_pitch_count = 14  # original 12 pitches + SOS + EOS
-            pitch_offset = (self.sos_out_vocab_size + self.timeshift_vocab_size +
-                            self.dur_vocab_size + self.octave_vocab_size)
-            # pitch_offset = 8212 for default config
-            original_decode_vocab = pitch_offset + self._original_pitch_count + self.instrument_vocab_size + self.velocity_vocab_size
-            # original_decode_vocab = 8487 for moonbeam-M
+            # Append-only pitch_dict: maps cent values to language token IDs
+            # Resolution controls the cent grid: 1-cent (0,1,2,...,1199) or 10-cent (0,10,20,...,1190)
+            # Western semitones (0,100,...,1100) always map to original pretrained IDs
+            # Non-western cents get new appended IDs after original_decode_vocab
+            pitch_offset = self.pitch_offset
+            original_decode_vocab = self.original_decode_vocab
+            resolution = self.microtonal_resolution
 
             self.pitch_dict = {}
-            micro_id = original_decode_vocab  # start appending at 8487
+            micro_id = original_decode_vocab
+            num_pitches = self.pitch_class_vocab_size - 2  # exclude SOS/EOS
 
-            for c in range(self.pitch_class_vocab_size):  # 0..1201
-                if c < 1200 and c % 100 == 0:
+            for idx in range(num_pitches):
+                c = idx * resolution  # actual cent value (e.g., 0,1,2,...,1199 or 0,10,20,...,1190)
+                if c % 100 == 0:
                     # Western semitone: map to ORIGINAL pretrained ID
-                    western_pc = c // 100  # 0-11
-                    self.pitch_dict[c] = pitch_offset + western_pc
-                elif c >= 1200:
-                    # SOS (1200) and EOS (1201): map to original SOS/EOS pitch IDs
-                    original_idx = 12 + (c - 1200)  # 12 = SOS, 13 = EOS
-                    self.pitch_dict[c] = pitch_offset + original_idx
+                    self.pitch_dict[c] = pitch_offset + (c // 100)
                 else:
                     # Microtonal cent: append after original vocab
                     self.pitch_dict[c] = micro_id
                     micro_id += 1
-            # micro_id should now be 8487 + 1188 = 9675
+
+            # SOS and EOS: always at compound values 1200/1201, mapped to original IDs
+            self.pitch_dict[1200] = pitch_offset + 12  # SOS pitch
+            self.pitch_dict[1201] = pitch_offset + 13  # EOS pitch
 
             # Instrument and velocity keep ORIGINAL offsets (not shifted by pitch expansion)
-            instr_offset = pitch_offset + self._original_pitch_count  # 8212 + 14 = 8226
+            instr_offset = self.pitch_offset + self._original_pitch_count
             self.instrument_dict = {i: instr_offset + i for i in range(self.instrument_vocab_size)}
-            vel_offset = instr_offset + self.instrument_vocab_size  # 8226 + 131 = 8357
+            vel_offset = instr_offset + self.instrument_vocab_size
             self.velocity_dict = {i: vel_offset + i for i in range(self.velocity_vocab_size)}
         else:
             self.pitch_dict = {i: i+self.sos_out_vocab_size+self.timeshift_vocab_size+self.dur_vocab_size+self.octave_vocab_size for i in range(self.pitch_class_vocab_size)}
@@ -462,6 +473,10 @@ class MusicTokenizer():
                             pitchbend_state[message.channel], self.pitchbend_sensitivity)
                         canonical_pitch = message.note + bend_semitones # MIDI note is integer (60 for C4), bend_semitones is a float (-0.5 semitone for 2048 pitchbend value) ===> canonical_pitch is a float semitone value like 59.5
                         octave, pitch_class = pitch_to_octave_pitch_class_microtonal(canonical_pitch)
+                        # Round to nearest resolution step
+                        if self.microtonal_resolution > 1:
+                            pitch_class = round(pitch_class / self.microtonal_resolution) * self.microtonal_resolution
+                            pitch_class = max(0, min(1199, pitch_class))
                     else:
                         octave, pitch_class = pitch_to_octave_pitch_class(message.note)
 
