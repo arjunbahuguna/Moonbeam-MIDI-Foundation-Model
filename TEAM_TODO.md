@@ -11,9 +11,9 @@
 | Task | Status | Notes |
 |------|--------|-------|
 | **A1.** Microtonal MIDI parsing | DONE | Helper functions + midi_to_compound in music_tokenizer.py |
-| **A2.** SymbTr data preprocessing | PARTIAL | data_preprocess.py has --microtonal flag + SymbTr label parsing; symbtr_dataset.py created; needs actual processing run |
+| **A2.** SymbTr data preprocessing | DONE | 3000/3000 files processed. Output: `~/projects/microtok/data/symbtr_processed/` (processed/*.npy + train_test_split.csv). 1.16M notes, 52 unique cent values, 83.5% microtonal, train/test=2700/300 |
 | **A3.** 53-TET augmentation | NOT STARTED | Needs A2 complete |
-| **A4.** Western replay data | NOT STARTED | Needs Lakh subset with pitch*100 conversion |
+| **A4.** Western replay data | DONE | Maestro v3: 1272/1276 files preprocessed (4 failed: large onset/duration). Output: `~/projects/microtok/data/maestro_processed/` (processed/*.npy + train_test_split.csv) |
 | **B1.** Model config | DONE | model_config_microtonal.json created |
 | **B2.** modeling_llama.py bugfixes | DONE | .long() cast, position_ids dtype fix |
 | **B3.** Append-only pitch_dict | DONE | In music_tokenizer.py |
@@ -25,7 +25,7 @@
 | **C3.** L_anchor regularization | DONE | In train_utils.py train_con_gen(), logged to wandb |
 | **C3b.** L_smooth regularization | DONE | Adjacent-bin pairs, logged to wandb |
 | **C4.** Per-param LR groups | DONE | 3 param groups (LoRA, decoder head, GRU) + 3x gradient scaling hook for new rows in real_finetuning_microtonal.py |
-| **C5.** Data mixing logic | NOT DONE | Needs A2+A4 (WeightedRandomSampler code in TODO) |
+| **C5.** Data mixing logic | DONE | WeightedRandomSampler in real_finetuning_microtonal.py. CLI: `--western_data_dir=... --western_csv_file=... --mixing_alpha=0.8`. Packing only. |
 | **C6.** GRU accuracy logging | DONE | Per-attribute + western/micro pitch split in modeling_llama.py |
 | **D1.** Inference float buffer | DONE | generation.py: float32 token buffer |
 | **D2.** convert_from → cents (no /100.0) | DONE | Returns integer cents; embed_tokens handles /100.0 for both training+inference |
@@ -43,23 +43,238 @@
 | **D12.** Per-makam perplexity breakdown | NOT STARTED | Needs trained model + SymbTr metadata |
 | **D13.** Naive quantization baseline | NOT STARTED | Needs SymbTr data (A2); no arch changes |
 
-**Summary:** All model/tokenizer/training-loop code (B1-B5, C1-C4, C6, D1-D3) is DONE. A2 partially done (preprocessing script + dataset class).
+**Summary:** All model/tokenizer/training-loop code (A1-A2, A4, B1-B5, C1-C6, D1-D3) is DONE.
 **Test suite:** 57 unit tests in `tests/test_microtonal.py` (run: `python -m pytest tests/test_microtonal.py -v --noconftest`).
 **Model variants:** Both S (309M, model_config_small_microtonal.json) and M (839M, model_config_microtonal.json) are supported. All offsets derived from config — no hardcoded model-specific values.
+**IMPORTANT — Model S vs M use DIFFERENT pretraining data (paper Table 6):**
+- **Moonbeam-S (309M):** Pretrained on LakhMIDI only. GRU output=2341, onset/dur=1024.
+- **Moonbeam-M (839M):** Pretrained on 19 datasets (paper Table 5, 81.6K hrs). GRU output=8487, onset/dur=4097.
+- Western replay data must match the model variant's pretraining corpus.
 **Resolution:** `microtonal_resolution` in JSON config (1=1-cent, 10=10-cent) controls tokenization grid end-to-end.
-Remaining: actual SymbTr processing run (A2), augmentation (A3), western replay data (A4), data mixing (C5), evaluation (D4-D13).
-**Critical path:** A2 processing run → A3 (augmentation) → A4 (western replay) → C5 (mixing) → first training run → D4+ (evaluation).
+Remaining: augmentation (A3), evaluation (D4-D13).
+**Ready to train:** SymbTr-only run needs no further code. Full mixed run (SymbTr + Maestro replay) is also ready.
+**Pretrained checkpoints:** `models/moonbeam_309M.pt` (S) and `models/moonbeam_839M.pt` (M) — already in repo.
+
+### Complete Training Pipeline (from preprocessed data to training)
+
+#### Dataset path configuration
+
+The placeholder paths in `datasets.py` (`/PATH/TO/DATA/DIR`, `/PATH/TO/CSV`) are defaults
+overridden at runtime. Two approaches (both work identically):
+
+**Option A — Edit `datasets.py` + reinstall** (Moonbeam README approach, line 46):
+```python
+# In src/llama_recipes/configs/datasets.py
+@dataclass
+class symbtr_dataset:
+    data_dir: str = "/home/USER/projects/microtok/data/symbtr_processed"
+    csv_file: str = "/home/USER/projects/microtok/data/symbtr_processed/train_test_split.csv"
+```
+Then: `pip install .`
+
+**Option B — CLI args with dot notation** (no reinstall needed):
+```bash
+--symbtr_dataset.data_dir ~/projects/microtok/data/symbtr_processed \
+--symbtr_dataset.csv_file ~/projects/microtok/data/symbtr_processed/train_test_split.csv
+```
+
+Path flow: CLI args → `update_config()` (config_utils.py:30-35) → dataset dataclass → dataset class constructor.
+
+#### Recommended training hyperparameters
+
+Based on computed data sizes and CPT literature (see `configs/training.py` for guidance comments):
+
+| Parameter | Recommended | Rationale |
+|-----------|-------------|-----------|
+| `context_length` | **1024** | MUST match pretrained model. Moonbeam S/M both trained at 1024. Using 2048 would create unseen positional encodings. |
+| `lr` | **2e-5** | CPT standard: 10-30x lower than pretraining (3e-4). Prevents catastrophic forgetting. |
+| `weight_decay` | **0.01** | Mild regularization for CPT (pretraining used 0.0). |
+| `gamma` | **0.85** | Same StepLR decay as pretraining (paper Section 4.1). |
+| `num_epochs` | **20-30** | Small dataset (~1M tokens) needs multiple passes. Music for All (Mehta 2025) uses 20-25 epochs with early stopping on similar-sized Makam data. Use validation_interval + patience to stop early. |
+| `batch_size_training` | **4** | Moonbeam pretraining used batch packing on 2x A100. 4 works on single A100 (40GB) with LoRA. |
+| `mixing_alpha` | **0.8** | 80% micro / 20% western. Literature: 5-30% replay prevents forgetting. |
+| `gradient_clipping` | **True** | Stabilizes early CPT steps (new vocab rows have interpolated init). |
+| `gradient_clipping_threshold` | **1.0** | Standard value. Matches Music for All (Mehta 2025). |
+| `use_peft` / `peft_method` | **True / lora** | LoRA + frozen backbone is standard for CPT with small target domain. Music for All uses bottleneck adapters (0.1% params) — same spirit. |
+| `validation_interval` | **100** | Check val loss every 100 steps. Stop if no improvement for patience=5 intervals. |
+
+**Data size estimates (context_length=1024):**
+- SymbTr train: 2700 pieces, ~1.04M tokens → **~1004 packed chunks**
+- Maestro train: 1144 pieces, ~6.32M tokens → **~1138 packed chunks**
+- Combined: **~2142 chunks/epoch**
+- At batch_size=4: **~536 steps/epoch**
+- 20 epochs ≈ 10,720 steps, 30 epochs ≈ 16,080 steps
+- With early stopping (patience 5 checks × 100 steps = stop after 500 steps of no improvement)
+
+**Reference — Music for All (Mehta et al. 2025, arXiv:2502.07328):**
+Adapts MusicGen/Mustango to Turkish Makam + Hindustani Classical with PEFT adapters.
+Key findings relevant to our work:
+- 20-25 epochs with early stopping (patience 5) on ~97h Makam audio
+- LR 4.5-5e-5, weight_decay 0.01-0.05, grad clip 1.0, batch_size 4
+- **No replay data → observed catastrophic forgetting** (Mustango creativity queries regressed). Validates our C5 replay approach.
+- Adapter size 0.1% of total params (2M/2B). Similar to LoRA parameter efficiency.
+- PEFT effectiveness varies by model architecture — not all models adapt equally well.
+
+#### Quick first training run (SymbTr only, no replay)
+
+```bash
+# 1. Activate environment
+source ~/miniforge3/etc/profile.d/conda.sh && conda activate microtok
+
+# 2. Ensure packages are installed (after any source edits)
+cd ~/projects/microtok/Moonbeam-MIDI-Foundation-Model
+pip install .
+pip install src/llama_recipes/transformers_minimal/.
+
+# 3. Download pretrained checkpoint from HuggingFace
+#    https://huggingface.co/guozixunnicolas/moonbeam-midi-foundation-model
+#    Save to e.g. ~/projects/microtok/checkpoints/moonbeam_pretrained.pt
+
+# 4. Train (single GPU, SymbTr only)
+torchrun --nnodes 1 --nproc_per_node 1 src/llama_recipes/real_finetuning_microtonal.py \
+  --lr 2e-5 \
+  --weight_decay 0.01 \
+  --val_batch_size 2 \
+  --run_validation True \
+  --validation_interval 100 \
+  --save_metrics True \
+  --dist_checkpoint_root_folder checkpoints/microtonal_cpt \
+  --dist_checkpoint_folder ddp \
+  --trained_checkpoint_path ~/projects/microtok/checkpoints/moonbeam_pretrained.pt \
+  --pure_bf16 True \
+  --enable_ddp True \
+  --use_peft True \
+  --peft_method lora \
+  --quantization False \
+  --model_name microtonal_cpt \
+  --dataset symbtr_dataset \
+  --symbtr_dataset.data_dir ~/projects/microtok/data/symbtr_processed \
+  --symbtr_dataset.csv_file ~/projects/microtok/data/symbtr_processed/train_test_split.csv \
+  --output_dir checkpoints/microtonal_cpt \
+  --batch_size_training 4 \
+  --context_length 1024 \
+  --num_epochs 20 \
+  --gradient_clipping True \
+  --gradient_clipping_threshold 1.0 \
+  --use_wandb True \
+  --gamma 0.85
+```
+
+#### Full training run (with western replay)
+
+Same as above, plus:
+```bash
+  --western_data_dir ~/projects/microtok/data/maestro_processed \
+  --western_csv_file ~/projects/microtok/data/maestro_processed/train_test_split.csv \
+  --mixing_alpha 0.8
+```
+
+#### Data locations summary
+
+| Dataset | Path | Files | Notes |
+|---------|------|-------|-------|
+| SymbTr (microtonal) | `~/projects/microtok/data/symbtr_processed/` | 3000 .npy | DONE. CSV: `train_test_split.csv` (train=2700, test=300) |
+| Maestro (western replay) | `~/projects/microtok/data/maestro_processed/` | 1272 .npy | DONE. CSV: `train_test_split.csv`. All pitches = multiples of 100 |
+| Pretrained checkpoint (S) | `models/moonbeam_309M.pt` | 591 MB | In repo |
+| Pretrained checkpoint (M) | `models/moonbeam_839M.pt` | 1.6 GB | In repo |
+
+#### Ablation plan
+
+Run these configurations to measure each component's contribution:
+
+| Run | LoRA | Replay | L_anchor | L_smooth | Grad scaling | Notes |
+|-----|------|--------|----------|----------|-------------|-------|
+| 1. Full | Yes | Yes (α=0.8) | Yes | Yes | Yes (3×) | Main model |
+| 2. No replay | Yes | No | Yes | Yes | Yes | Measure forgetting |
+| 3. No regularization | Yes | Yes | No | No | Yes | Measure reg impact |
+| 4. No LoRA (full FT) | No | Yes | Yes | Yes | Yes | LoRA vs full |
+| 5. High replay | Yes | Yes (α=0.5) | Yes | Yes | Yes | Replay ratio sensitivity |
+
+### Remaining work (for colleagues)
+
+#### Phase 1b: Training + evaluation (needs GPU)
+1. **Run training** with CLI commands above. Monitor wandb for loss curves, GRU accuracy splits.
+2. **A3 (optional):** 53-TET augmentation — 52 transpositions per piece, 3.3x data increase. Run before training.
+3. **D4-D8:** Evaluation scripts — scaffold after first model checkpoint.
+4. **D13:** Naive quantization baseline — round microtonal pitches to nearest semitone, retrain. No arch changes.
+
+#### Phase 2: Makam classification (adapt player_classification branch)
+- Branch from `microtonal_cpt`, port `PlayerClassificationDataset` from `finetune_player_classification`
+- Change: 30 player classes → 161 makam classes (labels from SymbTr filenames, already in CSV)
+- Uses `LlamaForSequenceClassification` with `<classification>` token (-4)
+- Provides intrinsic evaluation: can the model distinguish makams?
+
+#### Phase 3: Conditional generation (see section below)
 
 ### Future: Conditional Generation (Phase 2+)
 
 SymbTr filenames encode three labels: `[makam]--[form]--[usul]--[title]--[artist]`.
-These are directly usable as metadata conditions via Moonbeam's existing conditional generation framework:
-- **Phase 2:** Makam as metadata token (e.g., `makam_Hicaz = -334`). Minimal code: new dataset class + new negative token IDs. See `review_plan_microtok.md` Section 9.
-- **Phase 3a:** Makam scale degrees as temporal condition (between `<soc>`/`<eoc>`).
-- **Phase 3b:** Usul (rhythmic cycle) as temporal condition.
-- All phases depend on Phase 1 (CPT) being complete.
-- **Branching:** Create `microtonal_conditional` from `microtonal_cpt` (has all microtonal fixes), then port conditional infra from `conditional_gen_commu` branch. Do NOT branch from `conditional_gen_commu` (zero microtonal code there).
-- **Dataset:** `symbtr_dataset.py` already supports `return_conditioning=True` with makam/form/usul IDs parsed from filenames.
+These are directly usable as metadata conditions via Moonbeam's existing conditional generation framework.
+
+#### Existing conditioning infrastructure (on other branches)
+
+The codebase already has two conditional generation patterns:
+
+**Pattern A — Emotion conditioning (`emophia_con_gen_dataset.py`):**
+Simple: prepend a single token before SOS → `[emotion_4Q] + [SOS] + music + [EOS]`.
+Labels for the condition token = dummy SOS labels (not predicted by GRU).
+Uses `encode_series_con_gen_emotion()` / `encode_series_labels_con_gen_emotion()`.
+
+**Pattern B — Multi-condition (`commu_con_gen_dataset.py`, `conditional_gen_commu` branch):**
+Rich: `[metadata_tokens] + [SOC] + chords + [EOC] + [SOS] + music + [EOS]`.
+Uses `LlamaForCausalLM_Conditional_Generation` (modeling_llama.py:1956) — a **separate model class**
+that adds supplementary embeddings, chord conditioning layers, and 10% chord dropout.
+Uses `encode_series_con_gen_commu()` / `encode_series_labels_con_gen_commu()`.
+Forward accepts `metadata_condition` and `bar_beat_chord_condition` tensors.
+
+**Pattern C — Classification (`finetune_player_classification` branch):**
+Uses `LlamaForSequenceClassification` with a `<classification>` token (-4).
+Chunks sequences by duration. 30-class player identification.
+Adaptable for **makam classification evaluation** (D7).
+
+#### Dataset classes comparison
+
+| Class | Path Convention | Purpose |
+|-------|----------------|---------|
+| `LakhDataset` | `data_dir/processed/file.npy` | Unconditional, bare minimum |
+| `MergeDataset` | `data_dir/file.npy` (**no `processed/`!**) | Unified directory loader |
+| `SymbTrDataset` | `data_dir/processed/file.npy` | Optional makam/form/usul conditioning |
+| `Emophia_Con_Gen_Datasets` | `data_dir/processed/file.npy` | Emotion 4Q token |
+| `Commu_Con_Gen_Datasets` | `data_dir/processed/file.npy` | Metadata + chords (SOC/EOC) |
+| `PlayerClassificationDataset` | `data_dir/processed/file.npy` | Classification with chunking |
+
+**Why `SymbTrDataset` has `return_conditioning`:** It pre-computes makam/form/usul integer IDs
+from the CSV (which encodes them from filenames). When `return_conditioning=True`, `__getitem__`
+returns `symbtr_makam_id`, `symbtr_form_id`, `symbtr_usul_id` alongside the standard
+`input_ids`/`labels`/`attention_mask`. These are currently unused by `LlamaForCausalLM`
+(which rejects extra kwargs) but are ready for Phase 2 conditional generation.
+
+#### Phase 2: Makam conditional generation (simplest — Pattern A)
+
+- Prepend makam token before SOS: `[makam_token] + [SOS] + music + [EOS]`
+- Assign negative compound IDs: `makam_Hicaz = [-334, -334, -334, -334, -334, -334]` etc.
+- Add `encode_series_con_gen_makam()` to music_tokenizer.py (modeled on emotion version)
+- `SymbTrDataset` already has the IDs — just need to map them to token IDs
+- Minimal: new encode/decode methods + new negative token registrations. Same model class.
+
+#### Phase 3a: Makam scale degrees as temporal condition (Pattern B)
+
+- Makam scale degrees (e.g., Rast: C D E♭↓ F G A B♭↓) encoded as chord-like condition
+- Frame with SOC/EOC: `[makam_id] + [SOC] + scale_degrees + [EOC] + [SOS] + music + [EOS]`
+- Requires `LlamaForCausalLM_Conditional_Generation` model class
+- More powerful but more complex
+
+#### Phase 3b: Usul (rhythmic cycle) as temporal condition
+
+- Rhythmic pattern encoded similarly to chord progressions
+- Could combine with Phase 3a: `[makam_id] + [SOC] + scale + usul + [EOC] + ...`
+
+#### Branching strategy
+
+- **Create `microtonal_conditional` from `microtonal_cpt`** (has all microtonal fixes)
+- Port conditional generation infrastructure from `conditional_gen_commu` branch
+- **Do NOT branch from `conditional_gen_commu`** (zero microtonal code there)
+- Player classification from `finetune_player_classification` can be adapted for makam evaluation (D7)
 
 ---
 
@@ -163,37 +378,39 @@ Modify `midi_to_compound()` (line 341) — add pitchbend tracking + note-0 filte
 
 ---
 
-### A2. SymbTr Data Preprocessing
+### A2. SymbTr Data Preprocessing — DONE ✓
 
 **Owner:** ___
-**Files:** `data_preprocess.py`, new `model_config_microtonal.json` (from B1)
-**Blocked by:** A1, B1
+**Files:** `data_preprocess.py`, `model_config_microtonal.json`
+**Status:** COMPLETE (2026-03-07)
 
-**SymbTr dataset properties** (from `symbtr/` documentation):
-- 3000 Type-1 two-track MIDI files at 480 ticks/beat
-- 52 unique pitchbend values (-1932 to +2009), max deviation ~49 cents
-- 40 unique MIDI note values (range 55-96, octaves 4-8), plus note 0 (rest marker)
-- Mostly monophonic, single channel (instrument=0 piano)
-- Most pieces 1-5 minutes (median ~2.5 min), a few outliers up to 35 min
-- File naming: `[makam]--[form]--[usul]--[title]--[artist]` (labels extractable for conditional gen)
-- Latest version: https://zenodo.org/records/15470412
+**Command used:**
+```bash
+python data_preprocess.py \
+  --dataset_name SymbTr \
+  --dataset_folder ~/projects/microtok/data/symbtr_raw/midi \
+  --output_folder ~/projects/microtok/data/symbtr_processed \
+  --model_config src/llama_recipes/configs/model_config_microtonal.json \
+  --train_ratio 0.9 \
+  --microtonal \
+  --pitchbend_sensitivity 2.0
+```
 
-**Steps:**
-1. Point `data_preprocess.py` at SymbTr v3 MIDI directory
-2. Instantiate tokenizer with `microtonal=True, pitchbend_sensitivity=2.0`
-3. Call `tokenizer.midi_to_compound(midi_path)` for each file — this already handles:
-   - Pitchbend tracking + canonical pitch computation
-   - Note-0 rest marker filtering
-   - Microtonal octave/cents decomposition
-4. Use `model_config_microtonal.json` for vocab limits
-5. Output `.npy` files with pitch in cents (int 0-1199)
-6. Generate train/test CSV split (80/20 or use existing SymbTr splits if available)
-7. **Verify:** no notes exceed `onset_vocab_size-3=4096` or `dur_vocab_size-3=4096` (SymbTr pieces are short — should be fine)
-8. Also extract makam/form/usul labels from filenames into the CSV (for future conditional gen)
-
-**Key detail:** `.npy` files store **integer cents** for pitch. Conversion to fractional semitones happens in `embed_tokens` (modeling_llama.py line 1437), NOT here or in the training loop.
-
-**Acceptance:** `processed/` folder with `.npy` files + `split.csv` (with makam labels), verified with spot-checks.
+**Results verified:**
+| Metric | Value |
+|--------|-------|
+| Files processed | 3000/3000 (100%) |
+| Total notes | 1,163,006 |
+| Unique pitch cents | 52 (matches SymbTr documentation) |
+| Microtonal notes | 83.5% |
+| Western notes | 16.5% (multiples of 100) |
+| Note length range | 18–6035 (mean 388, median 375) |
+| Octave range | 4–7 (concentrated in 5-6) |
+| Train/test split | 2700/300 (90/10%) |
+| Unique makams | 167 (6 empty) |
+| Output path | `~/projects/microtok/data/symbtr_processed/` |
+| CSV file | `train_test_split.csv` (columns: file_base_name, split, length, duration, makam, form, usul, title, artist) |
+| Data source | Zenodo: https://zenodo.org/records/15470412 |
 
 ---
 
@@ -237,21 +454,62 @@ for k in range(1, 53):
 ### A4. Western Replay Data Preparation
 
 **Owner:** ___
-**Files:** Data prep script
-**Blocked by:** Nothing (uses existing Lakh Dataset .npy files)
+**Files:** Data prep script (reuses `data_preprocess.py`)
+**Blocked by:** Nothing (download western MIDI, preprocess with `--microtonal`)
 
-Prepare a **subset of the original western Lakh Dataset** for data mixing during CPT:
+Prepare a **subset of western MIDI data** for data mixing during CPT to prevent catastrophic forgetting.
 
-1. Select a random subset of Lakh `.npy` files (enough for ~α mixing ratio)
-2. Suggested amount: if α=0.8 (80% microtonal), then western data ≈ 20% of total steps
-3. With 61.5M augmented microtonal notes, prepare ~15M western notes (~3750 Lakh files at ~4000 notes avg)
-4. **CRITICAL: Convert pitch column from semitones to cents** — multiply `[:, 3] *= 100` so that
-   C=0→0, C#=1→100, D=2→200, ..., B=11→1100. This makes western data compatible with
-   the microtonal tokenizer's pitch_dict (B3) and the `/100.0` conversion in the training loop (C2).
-5. Re-save as new `.npy` files in a separate directory (don't modify originals)
-6. Create a separate CSV or manifest pointing at these files
+#### Which dataset to use (depends on model variant):
 
-**Acceptance:** Western replay `.npy` files have pitch in cents (0, 100, 200, ..., 1100). A single microtonal tokenizer processes both western and microtonal data correctly.
+| Model | Pretraining Data (paper Table 6) | Best Western Replay Source |
+|-------|----------------------------------|---------------------------|
+| **Moonbeam-S (309M)** | LakhMIDI only | LakhMIDI subset |
+| **Moonbeam-M (839M)** | 19 datasets (Table 5, 81.6K hrs) | Maestro + ATEPP (or any Table 5 subset) |
+
+**Recommended datasets for Moonbeam-M western replay** (ranked by availability + quality):
+
+| Dataset | Hours | License | Download |
+|---------|-------|---------|----------|
+| **Maestro v3** | 197 | CC BY 4.0 | https://magenta.tensorflow.org/datasets/maestro |
+| **ATEPP** | 997 | CC BY 4.0 | https://github.com/BetsyTang/ATEPP |
+| **ASAP** | 111 | CC BY-NC-SA 4.0 | https://github.com/CPJKU/asap-dataset |
+| **PiJAMA** | 217 | CC BY-NC 4.0 | https://github.com/ETH-DISCO/PiJAMA |
+| **GuitarSet** | 3 | CC BY 4.0 | https://zenodo.org/records/3371780 |
+
+**Maestro v3 is the top recommendation:** freely available, CC BY 4.0, 197 hours (~42M tokens),
+high-quality piano performance MIDI, already used in Moonbeam-M pretraining. Alone it provides
+enough data for 20% replay with ~3000 SymbTr files.
+
+#### Preprocessing steps:
+
+1. Download western MIDI to e.g. `~/projects/microtok/data/maestro_raw/`
+2. **Re-preprocess with `--microtonal` flag** (same pipeline as SymbTr):
+   ```bash
+   python data_preprocess.py \
+     --dataset_name Maestro \
+     --dataset_folder ~/projects/microtok/data/maestro_raw \
+     --output_folder ~/projects/microtok/data/maestro_processed \
+     --model_config src/llama_recipes/configs/model_config_microtonal.json \
+     --train_ratio 0.9 \
+     --microtonal
+   ```
+   Since western MIDI has no pitchbend, `--microtonal` simply outputs `pitch * 100`
+   (C=0→0, C#=1→100, ..., B=11→1100). This makes western data compatible with the
+   microtonal tokenizer's pitch_dict (B3) and the `/100.0` conversion in embed_tokens (C2).
+3. Output: `~/projects/microtok/data/maestro_processed/processed/*.npy` + CSV
+
+**Why re-preprocess instead of converting existing .npy files:**
+- Consistent pipeline (same tokenizer, same vocab limits, same CSV format)
+- No risk of forgetting the ×100 conversion
+- `data_preprocess.py` already handles the Maestro directory structure (recursive MIDI search)
+
+**Sizing:** With α=0.8 (80% microtonal), western data ≈ 20% of total steps.
+- Without augmentation: 3000 SymbTr files → need ~750 western files
+- With 53-TET augmentation (A3): ~159K SymbTr files → need ~40K western files
+- Maestro has ~1300 files — sufficient for non-augmented run, may need additional datasets for augmented run
+
+**Acceptance:** Western replay `.npy` files have pitch in cents (0, 100, 200, ..., 1100).
+A single microtonal tokenizer processes both western and microtonal data correctly.
 
 ---
 
@@ -756,35 +1014,71 @@ model.lm_head.weight.register_hook(scale_new_rows)
 ### C5. Data Mixing Logic
 
 **Owner:** ___
-**File:** `real_finetuning_microtonal.py` (dataset loading section, lines 240-256)
-**Blocked by:** A4 (western data), A2+A3 (microtonal data)
+**File:** `real_finetuning_microtonal.py` (dataset loading section, ~line 331)
+**Blocked by:** A4 (western data)
 
-Mix microtonal + western data during CPT to prevent catastrophic forgetting:
+Mix microtonal + western data during CPT to prevent catastrophic forgetting.
 
-**Prerequisite: Uniform cents format.** Western `.npy` files store pitch as 0-11 (semitones). Microtonal files store 0-1199 (cents). For a uniform pipeline, **A4 must re-save the western subset with pitch in cents** (`pitch_col * 100`), so C=0→0, C#=1→100, D=2→200, etc. Then C2's `/100.0` conversion works identically for both:
+#### C5 vs MergeDataset — NOT the same thing
+
+| | `MergeDataset` (existing) | C5 Data Mixing (new) |
+|---|---|---|
+| **What** | PyTorch Dataset class | Training-time sampling strategy |
+| **How** | One directory, one CSV, loads all files equally | Two separate datasets + `WeightedRandomSampler` |
+| **Ratio control** | None (uniform) | Tunable `alpha` parameter |
+| **Use case** | Pre-merged homogeneous data | Continual pretraining with forgetting control |
+
+**Use C5, NOT MergeDataset.** MergeDataset provides no sampling ratio control, which is essential
+for balancing new-domain learning against catastrophic forgetting.
+
+#### How it works
+
+**Prerequisite: Uniform cents format.** Both datasets must store pitch as integer cents.
+A4 handles this by re-preprocessing western MIDI with `--microtonal` (no pitchbend → pitch×100).
+Then C2's `/100.0` in embed_tokens works identically for both:
 - Western: `200 / 100.0 = 2.0` (D) — correct fractional semitone
 - Microtonal: `250 / 100.0 = 2.5` (D+50 cents) — correct fractional semitone
 
-With uniform cents, a **single microtonal tokenizer** handles both datasets. Western pitch cents (0, 100, 200, ..., 1100) map to original pretrained IDs (8212-8223) via B3's pitch_dict. Microtonal cents map to appended IDs (8487+). Everything is consistent.
+Western pitch cents (0, 100, 200, ..., 1100) map to original pretrained IDs (8212-8223) via B3's
+pitch_dict. Microtonal cents map to appended IDs (8487+). A single tokenizer handles both.
 
-```python
-# Both datasets use the SAME microtonal tokenizer (both store pitch as cents)
-dataset_microtonal = get_preprocessed_dataset(tokenizer, dataset_config_micro, split="train")
-dataset_western = get_preprocessed_dataset(tokenizer, dataset_config_western, split="train")
+#### Implementation — DONE (in `real_finetuning_microtonal.py`, lines 341-408)
 
-# Combine with weighted sampling for ratio control
-from torch.utils.data import ConcatDataset as TorchConcatDataset, WeightedRandomSampler
-dataset_combined = TorchConcatDataset([dataset_microtonal, dataset_western])
-alpha = 0.8  # 80% microtonal, 20% western replay
-weights = ([alpha / len(dataset_microtonal)] * len(dataset_microtonal) +
-           [(1 - alpha) / len(dataset_western)] * len(dataset_western))
-sampler = WeightedRandomSampler(weights, num_samples=len(dataset_combined), replacement=True)
+**How it works (packing strategy only):**
 
-# Then pack as usual
-dataset_train = ConcatDataset_hybrid_padding_concatenating(dataset_combined, chunk_size=train_config.context_length)
+1. Load microtonal data via `get_preprocessed_dataset` → `SymbTrDataset` (2700 train pieces)
+2. Load western replay via `LakhDataset` (same `data_dir/processed/*.npy` + CSV format)
+3. Pack each dataset **separately** into 1024-token chunks (homogeneous chunks)
+4. Combine packed datasets with `torch.utils.data.ConcatDataset`
+5. Build per-chunk weights: `alpha/n_micro` for microtonal, `(1-alpha)/n_western` for western
+6. Use `WeightedRandomSampler(replacement=True)` for exact ratio control per epoch
+
+**Why `LakhDataset` for western data (not `MergeDataset` or `SymbTrDataset`):**
+- `LakhDataset` uses `data_dir/processed/filename.npy` — matches preprocessed directory layout
+- `MergeDataset` uses `data_dir/filename.npy` (no `processed/` subdir) — would fail on our data
+- `SymbTrDataset` would also work (handles missing conditioning columns), but `LakhDataset` is
+  semantically correct for western data and avoids unnecessary conditioning overhead
+
+**Why pack separately then combine (not combine then pack):**
+- Packing combined data mixes microtonal and western notes within chunks, losing ratio control
+- Separate packing produces homogeneous chunks (each is purely micro or purely western)
+- `WeightedRandomSampler` then controls how many of each type are sampled per epoch
+
+**FSDP/DDP:** Falls back to `DistributedSampler` (uniform sampling over combined dataset).
+Exact ratio control requires a custom distributed weighted sampler — not needed for initial experiments.
+
+**Single-GPU packing (no FSDP/DDP):** `get_dataloader_kwargs` returns no sampler,
+so `WeightedRandomSampler` is added cleanly without conflict.
+
+#### CLI args (added to `training.py`)
+
+```bash
+--western_data_dir ~/projects/microtok/data/maestro_processed \
+--western_csv_file ~/projects/microtok/data/maestro_processed/train_test_split.csv \
+--mixing_alpha 0.8
 ```
 
-**Config:** `alpha = 0.8` (tune based on forgetting metrics in D5).
+**Backward compatible:** Omitting `--western_data_dir` runs on microtonal data alone (original behavior).
 
 **Acceptance:** Mixed dataloader produces batches with both western and microtonal samples. Loss converges.
 

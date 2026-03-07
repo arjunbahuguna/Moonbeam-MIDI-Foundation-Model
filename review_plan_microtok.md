@@ -1,15 +1,40 @@
 # Microtonal Continual Pretraining for Moonbeam — Full Analysis & TODO
 
-> **Status (2026-03-07):** All model/tokenizer/training-loop code is IMPLEMENTED on `microtonal_cpt` branch
-> (streams B, C1-C4, C6, D1-D3). **57 unit tests passing** (`tests/test_microtonal.py`).
+> **Status (2026-03-07):** ALL implementation code is DONE on `microtonal_cpt` branch
+> (streams A1-A2, A4, B1-B5, C1-C6, D1-D3). **57 unit tests passing** (`tests/test_microtonal.py`).
 > Both model variants supported: S (309M, `model_config_small_microtonal.json`) and M (839M, `model_config_microtonal.json`).
 > All vocab offsets derived from JSON config — no hardcoded model-specific values.
 > `microtonal_resolution` (1-cent or 10-cent) is configurable end-to-end from JSON.
-> A2 partially done: `data_preprocess.py` has `--microtonal` flag + SymbTr label parsing; `symbtr_dataset.py` created and registered.
-> Remaining: actual SymbTr processing run (A2), augmentation (A3), western replay data prep (A4), data mixing code (C5), evaluation (D4-D13).
-> See TEAM_TODO.md for detailed per-task status.
-> **Critical path:** A2 run → A3 (augmentation) → A4 (western replay) → C5 (mixing) → first training run → D4+ (evaluation).
-> **Quick first run:** A2 run only → train on SymbTr alone (no augmentation/replay) to validate pipeline.
+>
+> **Data DONE:**
+> - **A2:** 3000 SymbTr files → `~/projects/microtok/data/symbtr_processed/` (1.16M notes, 52 unique cents, 83.5% microtonal)
+> - **A4:** 1272 Maestro v3 files → `~/projects/microtok/data/maestro_processed/` (western, all pitch = multiples of 100)
+> - **C5:** Data mixing implemented in `real_finetuning_microtonal.py` (WeightedRandomSampler, packing-only)
+>
+> **Ready to train.** No code blockers. Remaining: augmentation (A3, optional), evaluation (D4-D13, needs trained model).
+> See TEAM_TODO.md for detailed per-task status, training pipeline, CLI commands, and recommended hyperparameters.
+>
+> **Training hyperparameters (CPT):** `lr=2e-5`, `context_length=1024` (MUST match pretrained),
+> `num_epochs=20-30` (early stopping, patience 5), `weight_decay=0.01`, `gamma=0.85`,
+> `gradient_clipping=True`, `batch_size=4`. Informed by Music for All (Mehta 2025): 20-25 epochs
+> on similar Makam data with PEFT adapters.
+> Data: ~1004 micro chunks + ~1138 western chunks = ~2142 chunks/epoch at context_length=1024.
+> At batch_size=4: ~536 steps/epoch. 20 epochs ≈ 10,720 steps.
+>
+> **Pretrained checkpoints:** `models/moonbeam_309M.pt` (S) and `models/moonbeam_839M.pt` (M) — already in repo.
+>
+> **IMPORTANT — Model S vs M use DIFFERENT pretraining data (paper Table 6):**
+> - Moonbeam-S (309M): LakhMIDI only, GRU output=2341
+> - Moonbeam-M (839M): 19 datasets (81.6K hrs), GRU output=8487
+> - Our microtonal configs target BOTH variants. Western replay must match the variant's pretraining corpus.
+>
+> **Dataset path configuration:** Placeholder paths in `datasets.py` are overridden at runtime via
+> CLI dot notation (e.g., `--symbtr_dataset.data_dir=...`) or by editing `datasets.py` + reinstall.
+> See TEAM_TODO.md "Complete Training Pipeline" section for full commands.
+>
+> **C5 Data Mixing:** `WeightedRandomSampler` over two separately-packed datasets for tunable mixing ratio.
+> Uses `LakhDataset` for western data (NOT `MergeDataset` — different path convention, no ratio control).
+> CLI: `--western_data_dir ... --western_csv_file ... --mixing_alpha 0.8`. Backward compatible.
 >
 > **NOTE on Section 6.5.2 Change 2 below:** The original plan said `convert_from_language_tokens()` should
 > divide pitch by 100.0. This was CHANGED during implementation — `convert_from` now returns **integer cents**
