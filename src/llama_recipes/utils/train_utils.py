@@ -827,7 +827,7 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                             if gru_acc:
                                 for attr_name, acc in gru_acc.items():
                                     log_dict[f'train/gru_acc/{attr_name}'] = acc
-                            wandb_run.log(log_dict)
+                            wandb_run.log(log_dict, step=epoch * len(train_dataloader) + step)
 
                     pbar.set_description(f"Training Epoch: {epoch}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
 
