@@ -273,7 +273,7 @@ if __name__ == '__main__':
             midi_files = train_files + test_files
 
     # Pre-compute SymbTr metadata labels for every file.  For non-SymbTr
-    # datasets the helper returns empty strings, keeping the CSV generic.
+    # datasets the helper returns empty strings, keeping the CSV generic
     file_labels = [parse_symbtr_labels(os.path.basename(f)) for f in midi_files]
 
     #determine vocab size
@@ -285,6 +285,7 @@ if __name__ == '__main__':
         pitch_class_vocab_size = data.get("pitch_class_vocab_size", None)
         instrument_vocab_size = data.get("instrument_vocab_size", None)
         velocity_vocab_size = data.get("velocity_vocab_size", None)
+        microtonal_resolution = data.get("microtonal_resolution", 1)
         assert onset_vocab_size and dur_vocab_size
     print(f"processing using {num_cores} cpus. tokenizer config: max timeshift allowed: {onset_vocab_size-3}, max duration allowed: {dur_vocab_size-3}")
     if args.microtonal:
@@ -299,20 +300,21 @@ if __name__ == '__main__':
         velocity_vocab_size=velocity_vocab_size,
         microtonal=args.microtonal,
         pitchbend_sensitivity=args.pitchbend_sensitivity,
+        microtonal_resolution=microtonal_resolution,
     )
 
     # Open the CSV file for writing directly
     with open(csv_file_path, 'w', newline='') as csvfile:
         csv_writer = csv.writer(csvfile)
         # Header includes SymbTr metadata columns; non-SymbTr rows will have
-        # empty strings for those columns.
+        # empty strings for those columns
         csv_writer.writerow([
             'file_base_name', 'split', 'length', 'duration',
             'makam', 'form', 'usul', 'title', 'artist',
         ])
 
         # Collect all results first so we can zip them with file_labels
-        # (executor.map preserves input order; each entry is a list of chunks).
+        # (executor.map preserves input order; each entry is a list of chunks)
         with ProcessPoolExecutor(max_workers=num_cores) as executor:
             all_results = list(tqdm(
                 executor.map(
