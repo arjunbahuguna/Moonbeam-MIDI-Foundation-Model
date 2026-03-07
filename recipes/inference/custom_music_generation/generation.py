@@ -98,6 +98,7 @@ class MusicLlama:
             velocity_vocab_size=llama_config.velocity_vocab_size,
             microtonal=getattr(llama_config, 'microtonal', False),
             pitchbend_sensitivity=getattr(llama_config, 'pitchbend_sensitivity', 2.0),
+            microtonal_resolution=getattr(llama_config, 'microtonal_resolution', 1),
         )
         
         if torch.cuda.is_bf16_supported():
@@ -175,7 +176,7 @@ class MusicLlama:
         for cur_pos in range(min_prompt_len, total_len): #recursively generate new tokens in parallel
             print(f"{cur_pos}/{total_len} generated")
             output = self.model.forward(input_ids = tokens[:, prev_pos:cur_pos], past_key_values = past_key_values, use_cache = True, attention_mask = None) #output logtis: (batch, len, dim 
-            next_decoder_token = torch.tensor(self.tokenizer.sos_out).to(tokens).expand(tokens.shape[0]*(cur_pos - prev_pos), 1) #batch*len_x, len_y = 1
+            next_decoder_token = torch.tensor(self.tokenizer.sos_out, dtype=torch.long, device=tokens.device).expand(tokens.shape[0]*(cur_pos - prev_pos), 1) #batch*len_x, len_y = 1
             next_decoder_token_out = next_decoder_token
             hidden_state = output.logits  #first forward pass: batch, len_x, dim --> batch*len_x, dim  --> num_layer, batch*len_x, dim; 
             hidden_state = hidden_state.view(hidden_state.shape[0]*hidden_state.shape[1], hidden_state.shape[2]).unsqueeze(0).expand(self.model.decoder.num_hidden_layers, -1, -1).contiguous() #batch, len_x, dim --> num_layer, batch*len_x, dim; 

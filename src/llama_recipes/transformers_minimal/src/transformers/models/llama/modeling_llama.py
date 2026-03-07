@@ -952,7 +952,16 @@ class LlamaSdpaAttention(LlamaAttention):
         cos_onset, sin_onset = self.rotary_emb_onset(value_states, position_ids[:, :, 0]) #position_ids: batch, len, 6; last dim: (onset, duration, octave, pitch_class, instrument, velocity)
         cos_dur, sin_dur = self.rotary_emb_dur(value_states, position_ids[:, :, 1]) 
         cos_octave, sin_octave = self.rotary_emb_octave(value_states, position_ids[:, :, 2]) 
-        cos_pitch, sin_pitch = self.rotary_emb_pitch(value_states, position_ids[:, :, 3]) 
+        pitch_pos = position_ids[:, :, 3]
+        if getattr(self.config, 'microtonal', False):
+            # Cents (0-1199) -> fractional semitones (0.00-11.99) to match pretrained
+            # RoPE range (0-11) -> without this, LoRA must compensate for 100x extrapolation
+            # Preserve EOS marker (2^15) so its RoPE encoding stays identical to pretraining
+            eos_marker = (pitch_pos == 2**15)
+            pitch_pos = pitch_pos.float() / 100.0
+            if eos_marker.any():
+                pitch_pos = torch.where(eos_marker, torch.tensor(float(2**15), device=pitch_pos.device), pitch_pos)
+        cos_pitch, sin_pitch = self.rotary_emb_pitch(value_states, pitch_pos)
         cos_velocity, sin_velocity = self.rotary_emb_velocity(value_states, position_ids[:, :, 5]) 
 
         query_states_split = query_states.view(bsz, 6, -1, q_len, self.head_dim) #(bsz, 6, head_q/6, len, dim) 
