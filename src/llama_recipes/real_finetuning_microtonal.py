@@ -338,6 +338,24 @@ def main(**kwargs):
     if not train_config.enable_fsdp or rank == 0:
         print(f"--> Training Set Length = {len(dataset_train)}")
 
+    # Load western replay data for CPT data mixing (5-30% replay prevents catastrophic forgetting)
+    western_train = None
+    mixing_weights = None
+    if train_config.western_data_dir:
+        if train_config.batching_strategy != "packing":
+            raise ValueError(
+                "Data mixing (western_data_dir) requires batching_strategy='packing'"
+            )
+        from types import SimpleNamespace
+        from llama_recipes.datasets.lakh_dataset import LakhDataset
+        western_config = SimpleNamespace(
+            data_dir=train_config.western_data_dir,
+            csv_file=train_config.western_csv_file,
+        )
+        western_train = LakhDataset(western_config, tokenizer, partition="train")
+        if not train_config.enable_fsdp or rank == 0:
+            print(f"--> Western Replay Set Length = {len(western_train)}")
+
     dataset_val = get_preprocessed_dataset(
         tokenizer,
         dataset_config,
@@ -346,7 +364,54 @@ def main(**kwargs):
     if train_config.batching_strategy == "packing":
         dataset_train = ConcatDataset_hybrid_padding_concatenating(dataset_train, chunk_size=train_config.context_length, split="train",data_dir = dataset_config.data_dir)
 
+        # Pack datasets separately so each chunk is homogeneous (all-micro or
+        # all-western). This is equivalent to batch-level mixing: each training
+        # batch contains chunks from both domains, and the block-diagonal
+        # attention mask ensures pieces within a chunk don't cross-attend 
+        # regardless of domain
+        if western_train is not None:
+            western_train_packed = ConcatDataset_hybrid_padding_concatenating(
+                western_train, chunk_size=train_config.context_length,
+                split="train", data_dir=train_config.western_data_dir,
+            )
+            n_micro = len(dataset_train)
+            n_western = len(western_train_packed)
+            alpha = train_config.mixing_alpha
+            # Weights sum to 1.0; each micro chunk gets alpha/n_micro,
+            # each western chunk gets (1-alpha)/n_western
+            mixing_weights = (
+                [alpha / n_micro] * n_micro
+                + [(1.0 - alpha) / n_western] * n_western
+            )
+            dataset_train = torch.utils.data.ConcatDataset(
+                [dataset_train, western_train_packed]
+            )
+            if not train_config.enable_fsdp or rank == 0:
+                print(
+                    f"--> Mixed training: {n_micro} micro chunks + "
+                    f"{n_western} western chunks, alpha={alpha}"
+                )
+
     train_dl_kwargs = get_dataloader_kwargs(train_config, dataset_train, tokenizer, "train")
+
+    # Override sampler for ratio-controlled mixing. Both packers start
+    # sample_count=1, so attention_mask IDs overlap across datasets, this is
+    # safe because _update_causal_mask compares IDs per batch element, not
+    # across batch elements. For FSDP/DDP, DistributedSampler is kept
+    # (uniform over combined dataset); exact ratio needs a custom sampler
+    if mixing_weights is not None:
+        if train_config.enable_fsdp or train_config.enable_ddp:
+            if rank == 0:
+                print(
+                    "WARNING: Data mixing with FSDP/DDP uses uniform sampling "
+                    "over the combined dataset. mixing_alpha is approximate."
+                )
+        else:
+            from torch.utils.data import WeightedRandomSampler
+            sampler = WeightedRandomSampler(
+                mixing_weights, num_samples=len(dataset_train), replacement=True,
+            )
+            train_dl_kwargs["sampler"] = sampler
 
     # Create DataLoaders for the training and validation dataset
     train_dataloader = torch.utils.data.DataLoader(

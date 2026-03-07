@@ -19,7 +19,7 @@ class train_config:
     #   weight_decay=0.01 (mild regularization)
     #   gamma=0.85        (keep same decay schedule)
     #   gradient_clipping=True, threshold=1.0  (stabilize early training)
-    #   num_epochs=5-10   (CPT converges faster than from-scratch)
+    #   num_epochs=20-30  (small dataset needs many passes; use early stopping patience=5)
     #   context_length=1024 (MUST match pretrained model)
     #   mixed_precision=True, use_fp16=True (same as pretraining)
     # -------------------------------------------------------------
@@ -67,3 +67,6 @@ class train_config:
     flop_counter_start: int = 3 # The step to start profiling, default is 3, which means after 3 steps of warmup stage, the profiler will start to count flops.
     use_profiler: bool = False # Enable pytorch profiler, can not be used with flop counter at the same time.
     profiler_dir: str = "PATH/to/save/profiler/results" # will be used if using profiler
+    western_data_dir: str = ""  # Western replay data directory (for microtonal CPT data mixing)
+    western_csv_file: str = ""  # Western data CSV file path
+    mixing_alpha: float = 0.8  # Fraction of microtonal samples when mixing (0.8 = 80% micro, 20% western)
