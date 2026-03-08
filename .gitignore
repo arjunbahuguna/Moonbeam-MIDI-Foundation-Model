@@ -28,3 +28,15 @@ src/llama_recipes/model_checkpointing/__pycache__/
 src/llama_recipes/utils/__pycache__/
 tests/__pycache__/
 wandb/
+/data_test_Yuhang
+/processed_data_Selected_SymbTr
+*.pyc
+*.pyc
+*.pyc
+*.xml
+*.pyc
+*.pyc
+*.pyc
+/src/llama_recipes/datasets/grammar_dataset/__pycache__
+/src/llama_recipes/utils/__pycache__
+/src/llama_recipes/configs/__pycache__

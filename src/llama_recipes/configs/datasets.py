@@ -46,8 +46,17 @@ class symbtr_dataset:
     dataset: str = "symbtr_dataset"
     train_split: str = "train"
     test_split: str = "test"
-    data_dir: str = "/PATH/TO/DATA/DIR"
-    csv_file: str = "/PATH/TO/CSV"
+    data_dir: str = "processed_data_Selected_SymbTr"
+    csv_file: str = "processed_data_Selected_SymbTr/train_test_split.csv"
+    return_conditioning: bool = False
+
+@dataclass
+class selected_symbtr_dataset:
+    dataset: str = "selected_symbtr_dataset"
+    train_split: str = "train"
+    test_split: str = "test"
+    data_dir: str = "processed_data_Selected_SymbTr"
+    csv_file: str = "processed_data_Selected_SymbTr/train_test_split.csv"
     return_conditioning: bool = False
 
 @dataclass
@@ -56,7 +65,7 @@ class merge_dataset:
     train_split: str = "train"
     test_split: str = "test"
     data_dir: str = "/PATH/TO/DATA/DIR"
-    csv_file: str = "/PATH/TO/CSV"
+    csv_file: str = "processed_data_Selected_SymbTr/train_test_split.csv"
 
 @dataclass
 class emophia_con_gen_dataset:

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.abspath("src")) # add this to fix :
 # ModuleNotFoundError: No module named 'llama_recipes.datasets.music_tokenizer'
 
 import fire
-from llama_recipes.real_finetuning_uncon_gen import main
+from llama_recipes.real_finetuning_microtonal import main
 
 if __name__ == "__main__":
     fire.Fire(main)

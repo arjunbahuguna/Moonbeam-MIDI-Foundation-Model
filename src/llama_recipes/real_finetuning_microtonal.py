@@ -14,10 +14,14 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import StepLR
-from transformers import (
-    AutoTokenizer,
+# from transformers import (
+#     AutoTokenizer,
+#     LlamaForCausalLM,
+#     LlamaConfig,
+# )
+from llama_recipes.transformers_minimal.src.transformers.models.llama.modeling_llama import (
     LlamaForCausalLM,
-    LlamaConfig,
+    LlamaConfig
 )
 from llama_recipes.datasets.music_tokenizer import MusicTokenizer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
@@ -92,8 +96,10 @@ def main(**kwargs):
     # 1-cent config (default): pitch_class_vocab_size=1202, decode_vocab_size=9675, microtonal_resolution=1
     # 10-cent ablation: set pitch_class_vocab_size=122, decode_vocab_size=8595, microtonal_resolution=10
     #   in the JSON config. NOTE: don't forget to also quantize pitch to nearest 10 cents in data preprocessing
-    model_config_path = "src/llama_recipes/configs/model_config_microtonal.json"
+    # model_config_path = "src/llama_recipes/configs/model_config_microtonal.json"
+    model_config_path = "src/llama_recipes/configs/model_config_small_microtonal.json"
     update_config((train_config, fsdp_config, ddp_config), **kwargs)
+
     print("updated training config", train_config)
     # Set the seeds for reproducibility
     if is_xpu_available():
@@ -151,6 +157,23 @@ def main(**kwargs):
 
         model = LlamaForCausalLM(llama_config)
 
+        # model use hidden_size as model's global hidden_size but this overwrite the lm head's config and they shared the same config. so I just edit the lm head manully here
+
+        # 👇================= NEW: Dynamic patch for lm_head mismatch =================👇
+        if hasattr(llama_config, "decoder") and isinstance(llama_config.decoder, dict):
+            # Dynamically read the correct GRU hidden size and expanded vocab size directly from config
+            correct_gru_hidden = llama_config.decoder["hidden_size"]
+            correct_vocab_size = llama_config.decode_vocab_size
+
+            # Forcefully overwrite the default lm_head to match the GRU decoder's dimensions
+            model.lm_head = torch.nn.Linear(correct_gru_hidden, correct_vocab_size, bias=False)
+            print(
+                f"🔧 Applied dynamic patch: Successfully rebuilt lm_head with shape [{correct_vocab_size}, {correct_gru_hidden}]")
+        # 👆=============================================================================👆
+
+        # The original code continues below
+        model_checkpoint = torch.load(train_config.trained_checkpoint_path)
+
         model_checkpoint = torch.load(train_config.trained_checkpoint_path)
 
         checkpoint = model_checkpoint['model_state_dict']
@@ -188,7 +211,7 @@ def main(**kwargs):
     if getattr(llama_config, 'microtonal', False):
         # Direct references to the Parameter tensors — these survive PEFT/DDP wrapping
         # because wrappers delegate to the same underlying nn.Parameter objects.
-        decoder_emb_weight = model.model.decoder_embedding.weight
+        decoder_emb_weight = model.decoder_embedding.weight
         lm_head_weight = model.lm_head.weight
 
         # Western pitch rows in the flat GRU vocab: pitch_offset + pitch_class (0-11)
