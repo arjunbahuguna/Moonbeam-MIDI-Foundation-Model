@@ -89,11 +89,8 @@ def setup_wandb(train_config, fsdp_config, llama_config, **kwargs):
 def main(**kwargs):
     # Update the configuration for the training and sharding process
     train_config, fsdp_config, ddp_config = TRAIN_CONFIG(), FSDP_CONFIG(), DDP_CONFIG()
-    # 1-cent config (default): pitch_class_vocab_size=1202, decode_vocab_size=9675, microtonal_resolution=1
-    # 10-cent ablation: set pitch_class_vocab_size=122, decode_vocab_size=8595, microtonal_resolution=10
-    #   in the JSON config. NOTE: don't forget to also quantize pitch to nearest 10 cents in data preprocessing
-    model_config_path = "src/llama_recipes/configs/model_config_microtonal.json"
     update_config((train_config, fsdp_config, ddp_config), **kwargs)
+    model_config_path = train_config.model_config
     print("updated training config", train_config)
     # Set the seeds for reproducibility
     if is_xpu_available():

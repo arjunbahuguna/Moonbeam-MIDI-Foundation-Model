@@ -69,6 +69,7 @@ class train_config:
     flop_counter_start: int = 3 # The step to start profiling, default is 3, which means after 3 steps of warmup stage, the profiler will start to count flops.
     use_profiler: bool = False # Enable pytorch profiler, can not be used with flop counter at the same time.
     profiler_dir: str = "PATH/to/save/profiler/results" # will be used if using profiler
+    model_config: str = "src/llama_recipes/configs/model_config_microtonal.json"  # Path to model config JSON
     western_data_dir: str = ""  # Western replay data directory (for microtonal CPT data mixing)
     western_csv_file: str = ""  # Western data CSV file path
     mixing_alpha: float = 0.8  # Fraction of microtonal samples when mixing (0.8 = 80% micro, 20% western)
