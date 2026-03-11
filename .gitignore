@@ -1,3 +1,9 @@
+__pycache__/
+src/llama_recipes/configs/__pycache__/
+src/llama_recipes/datasets/grammar_dataset/__pycache__/
+src/llama_recipes/model_checkpointing/__pycache__/
+src/llama_recipes/utils/__pycache__/
+tests/__pycache__/
 src/llama_recipes/datasets/__pycache__/
 src/llama_recipes/model/modeling_musicllama.py
 src/llama_recipes/transformers_minimal/build/*
@@ -13,19 +19,16 @@ src/llama_recipes/transformers_minimal/src/transformers/quantizers/__pycache__/
 src/llama_recipes/transformers_minimal/src/transformers/models/auto/__pycache__/
 src/llama_recipes/transformers_minimal/src/transformers.egg-info/
 
-# Datasets and data-processing files
+# Data, models, and other generated files
 data/
 checkpoints/
 processed_data/
 _validate_a2.py
 plans/
 val_file.py
-__pycache__/
 models/
 processed_datasets/
-src/llama_recipes/configs/__pycache__/
-src/llama_recipes/datasets/grammar_dataset/__pycache__/
-src/llama_recipes/model_checkpointing/__pycache__/
-src/llama_recipes/utils/__pycache__/
-tests/__pycache__/
 wandb/
+
+# Python
+.venv/
