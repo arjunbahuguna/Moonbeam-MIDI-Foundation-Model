@@ -14,13 +14,13 @@ transformers>=0.0.0
 sentencepiece
 py7zr
 scipy
-#optimum
+# optimum
 matplotlib
 gradio
 chardet
 openai
+mido
 
-#typing-extensions==4.8.0
 typing-extensions>=4.10.0
 
 tabulate
