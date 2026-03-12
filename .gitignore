@@ -21,6 +21,7 @@ src/llama_recipes/transformers_minimal/src/transformers.egg-info/
 
 # Data, models, and other generated files
 data/
+data_processed/
 checkpoints/
 processed_data/
 _validate_a2.py
@@ -32,3 +33,10 @@ wandb/
 
 # Python
 .venv/
+
+# HPC
+*.sh
+*.err
+*.out
+slurm/
+

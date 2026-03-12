@@ -24,7 +24,11 @@ import json
 from llama_recipes.model_checkpointing import save_model_checkpoint, save_model_and_optimizer_sharded, save_optimizer_checkpoint, save_model_checkpoint_ddp, save_peft_checkpoint
 from llama_recipes.policies import fpSixteen,bfSixteen, get_llama_wrapper
 from llama_recipes.utils.memory_utils import MemoryTrace
-from accelerate.utils import is_xpu_available, is_ccl_available
+# from accelerate.utils import is_xpu_available, is_ccl_available
+try:
+    from accelerate.utils import is_xpu_available, is_ccl_available
+except ImportError:
+    from accelerate.utils import is_xpu_available, is_xccl_available as is_ccl_available
 from llama_recipes.utils.flop_utils import FlopMeasure
 def set_tokenizer_params(tokenizer: LlamaTokenizer):
     tokenizer.pad_token_id = 0
