@@ -16,7 +16,9 @@ from llama_recipes.datasets import (
     get_merge_dataset,
     get_emophia_con_gen_dataset,
     get_commu_con_gen_dataset,
-    get_selected_symbtr_dataset
+    get_selected_symbtr_dataset,
+    get_symbtr_dataset_eval
+
 )
 
 
@@ -65,7 +67,8 @@ DATASET_PREPROC = {
     "merge_dataset": get_merge_dataset,
     "emophia_con_gen_dataset": get_emophia_con_gen_dataset,
     "commu_con_gen_dataset": get_commu_con_gen_dataset,
-    "selected_symbtr_dataset": get_selected_symbtr_dataset
+    "selected_symbtr_dataset": get_selected_symbtr_dataset,
+    "symbtr_dataset_eval" : get_symbtr_dataset_eval
 }
 
 

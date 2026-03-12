@@ -226,10 +226,10 @@ def plot_histogram(input_dict, x_label, y_label, title, xscale='log', save_path=
 # Main script execution
 if __name__ == '__main__':
     args = SimpleNamespace(
-        dataset_name="Selected_SymbTr",
-        dataset_folder="data_test_Yuhang/selected_midi_SymbTr",
-        output_folder="processed_data_Selected_SymbTr",
-        model_config="src/llama_recipes/configs/model_config_microtonal.json",
+        dataset_name="SymbTrv3",
+        dataset_folder="data_test_Yuhang/midi_SymbTr",
+        output_folder="processed_data_SymbTr",
+        model_config="src/llama_recipes/configs/config_micro/config.json",
         train_ratio=0.9,
         train_test_split_file=None,
         ts_threshold=None,

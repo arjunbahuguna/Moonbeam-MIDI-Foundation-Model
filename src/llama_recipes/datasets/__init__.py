@@ -10,3 +10,4 @@ from llama_recipes.datasets.merge_dataset import MergeDataset as get_merge_datas
 from llama_recipes.datasets.emophia_con_gen_dataset import Emophia_Con_Gen_Datasets as get_emophia_con_gen_dataset
 from llama_recipes.datasets.commu_con_gen_dataset import Commu_Con_Gen_Datasets as get_commu_con_gen_dataset
 from llama_recipes.datasets.selected_symbtr_dataset import SymbTrDataset as get_selected_symbtr_dataset
+from llama_recipes.datasets.symbtr_dataset_eval import SymbTrDataset as  get_symbtr_dataset_eval

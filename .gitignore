@@ -40,3 +40,5 @@ wandb/
 /src/llama_recipes/datasets/grammar_dataset/__pycache__
 /src/llama_recipes/utils/__pycache__
 /src/llama_recipes/configs/__pycache__
+*.npy
+*.pt
