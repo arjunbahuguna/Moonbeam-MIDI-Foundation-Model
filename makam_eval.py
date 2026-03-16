@@ -5,10 +5,10 @@ import os
 
 def main():
     # Configuration
-    CSV_FILE = "processed_data_SymbTr/train_test_split.csv"
+    CSV_FILE = "data/processed_data_symbtr/train_test_split.csv"
     MIN_TRAIN_PIECES = 10
-    OUTPUT_CSV = "processed_data_SymbTr/makam_classification_split.csv"
-    OUTPUT_LABEL_MAP = "processed_data_SymbTr/makam_label_map.json"
+    OUTPUT_CSV = "data/processed_data_symbtr/makam_classification_split.csv"
+    OUTPUT_LABEL_MAP = "data/processed_data_symbtr/makam_label_map.json"
 
     print("Processing data...")
 

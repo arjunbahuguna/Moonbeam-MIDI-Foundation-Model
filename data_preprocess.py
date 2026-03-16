@@ -227,8 +227,8 @@ def plot_histogram(input_dict, x_label, y_label, title, xscale='log', save_path=
 if __name__ == '__main__':
     args = SimpleNamespace(
         dataset_name="SymbTrv3",
-        dataset_folder="data_test_Yuhang/midi_SymbTr",
-        output_folder="processed_data_SymbTr",
+        dataset_folder="data/symbtr",
+        output_folder="data/processed_data_symbtr",
         model_config="src/llama_recipes/configs/config_micro/config.json",
         train_ratio=0.9,
         train_test_split_file=None,

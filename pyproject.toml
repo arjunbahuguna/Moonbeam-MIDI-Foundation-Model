@@ -10,7 +10,7 @@ authors = [
 ]
 description = "Moonbeam is a transformer-based MIDI foundation pretrained on a large and diverse collection of MIDI data."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: Other/Proprietary License",

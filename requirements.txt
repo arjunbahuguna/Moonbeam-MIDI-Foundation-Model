@@ -19,6 +19,8 @@ matplotlib
 gradio
 chardet
 openai
+mido
+pytest
 
 #typing-extensions==4.8.0
 typing-extensions>=4.10.0
