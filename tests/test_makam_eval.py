@@ -34,7 +34,6 @@ def test_makam_sample_counts(mock_classification_data):
     assert makam_counts['hicaz'] >= 10
     assert makam_counts['ussak'] >= 10
     # This assertion would fail for 'rast', demonstrating the test's utility
-    # assert (makam_counts >= 10).all(), "All makams should have at least 10 samples."
 
 def test_split_distribution_is_valid(mock_classification_data):
     """Tests that both 'train' and 'test' splits are present."""

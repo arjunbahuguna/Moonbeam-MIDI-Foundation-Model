@@ -41,4 +41,5 @@ files = ["requirements.txt"]
 [tool.pytest.ini_options]
 markers = [
     "skip_missing_tokenizer: skip tests when we can not access meta-llama/Llama-2-7b-hf on huggingface hub (Log in with `huggingface-cli login` to unskip).",
+    "slow: integration or data-dependent tests"
 ]
