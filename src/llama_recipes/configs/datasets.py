@@ -83,4 +83,15 @@ class commu_con_gen_dataset:
     data_dir: str = "/PATH/TO/DATA/DIR"
     csv_file: str = "/PATH/TO/CSV"
     additional_token_dict_path: str = "/PATH/TO/JSON"
+
+
+@dataclass
+class symbtr_dataset_eval:
+    dataset: str = "symbtr_dataset_eval"
+    train_split: str = "train"
+    test_split: str = "test"
+    data_dir: str = "data/processed_data_symbtr"
+    csv_file: str = "data/processed_data_symbtr/makam_classification_split.csv"
+    label_map: str = "data/processed_data_symbtr/makam_label_map.json"
+    seq_len: int = 1200
     

@@ -27,23 +27,25 @@ def parse_symbtr_labels(filename):
     are empty strings so the caller can still write the CSV row.
     """
     stem = os.path.splitext(os.path.basename(filename))[0]
-    parts = stem.split('--', 4)
+    parts = stem.split("--", 4)
     if len(parts) == 5:
         return {
-            'makam': parts[0],
-            'form': parts[1],
-            'usul': parts[2],
-            'title': parts[3],
-            'artist': parts[4],
+            "makam": parts[0],
+            "form": parts[1],
+            "usul": parts[2],
+            "title": parts[3],
+            "artist": parts[4],
         }
-    return {'makam': '', 'form': '', 'usul': '', 'title': '', 'artist': ''}
+    return {"makam": "", "form": "", "usul": "", "title": "", "artist": ""}
 
 
 def chunk_compounds(compounds, threshold=1024):
     """chunk the compounds such that long silences in between are not treated as long timeshifts"""
     onsets = [c[0] for c in compounds]
     onsets_padded = [0] + onsets
-    timeshifts = [onsets_padded[i + 1] - onsets_padded[i] for i in range(len(onsets_padded) - 1)]
+    timeshifts = [
+        onsets_padded[i + 1] - onsets_padded[i] for i in range(len(onsets_padded) - 1)
+    ]
     cur_pos = 0
     out = []
     for pointer in range(len(onsets)):
@@ -63,7 +65,7 @@ def find_midi_files(folder):
     midi_files = []
     for root, _, files in os.walk(folder):
         for file in files:
-            if file.endswith('.midi') or file.endswith('.mid') or file.endswith('.MID'):
+            if file.endswith(".midi") or file.endswith(".mid") or file.endswith(".MID"):
                 midi_files.append(os.path.join(root, file))
     return midi_files
 
@@ -71,88 +73,145 @@ def find_midi_files(folder):
 def find_midi_files_from_file(dataset_name, split_file, dataset_folder):
     if dataset_name == "GAPS":
         df = pd.read_csv(split_file)
-        train_files = df[df['split'] == 'train_annotation']['filename'].tolist()
-        test_files = df[df['split'] == 'test_annotation']['filename'].tolist()
+        train_files = df[df["split"] == "train_annotation"]["filename"].tolist()
+        test_files = df[df["split"] == "test_annotation"]["filename"].tolist()
         midi_files = train_files + test_files
         midi_files = [os.path.join(dataset_folder, f) for f in midi_files]
-        splits = ['train'] * len(train_files) + ['test'] * len(test_files)
+        splits = ["train"] * len(train_files) + ["test"] * len(test_files)
 
     elif dataset_name == "GuitarSet":
         import json
-        with open(split_file, 'r') as file:
+
+        with open(split_file, "r") as file:
             splits = json.load(file)
-        train_files = [os.path.join(dataset_folder, os.path.basename(f)) for f in splits['train_annotation']]
-        test_files = [os.path.join(dataset_folder, os.path.basename(f)) for f in splits['test_annotation']]
+        train_files = [
+            os.path.join(dataset_folder, os.path.basename(f))
+            for f in splits["train_annotation"]
+        ]
+        test_files = [
+            os.path.join(dataset_folder, os.path.basename(f))
+            for f in splits["test_annotation"]
+        ]
         midi_files = train_files + test_files
-        splits = ['train'] * len(train_files) + ['test'] * len(test_files)
+        splits = ["train"] * len(train_files) + ["test"] * len(test_files)
 
     assert len(midi_files) == len(splits)
     return midi_files, splits
 
 
 # Change 1: Added the tokenizer parameter.
-def process_midi_file_safe_v2(midi_file, split, onset_vocab_size, dur_vocab_size, output_folder, log_file, tokenizer,
-                              silence_threshold=None):
+def process_midi_file_safe_v2(
+    midi_file,
+    split,
+    onset_vocab_size,
+    dur_vocab_size,
+    output_folder,
+    log_file,
+    tokenizer,
+    silence_threshold=None,
+):
     """
     input: midi_file, split, onset_vocab_size, dur_vocab_size, output_folder, log_file, tokenizer, silence_threshold
     """
     try:
-        out = process_midi_file_v2(midi_file, split, onset_vocab_size, dur_vocab_size, output_folder, log_file,
-                                   tokenizer, silence_threshold)
+        out = process_midi_file_v2(
+            midi_file,
+            split,
+            onset_vocab_size,
+            dur_vocab_size,
+            output_folder,
+            log_file,
+            tokenizer,
+            silence_threshold,
+        )
         if out is not None:
             for out_chunk in out:
                 if out_chunk is not None:
-                    np.save(out_chunk['file'], out_chunk['compounds'])
+                    np.save(out_chunk["file"], out_chunk["compounds"])
         return out
     except Exception as e:
-        with open(log_file, 'a') as log:
-            log.write(f'Failed to process {midi_file}:\n')
+        with open(log_file, "a") as log:
+            log.write(f"Failed to process {midi_file}:\n")
             log.write(traceback.format_exc())
-            log.write('\n')
+            log.write("\n")
         return [None]
 
 
 def detect_large_timeshifts_and_durations(compounds, onset_vocab_size, dur_vocab_size):
     onsets = [c[0] for c in compounds]
     onsets_padded = [0] + onsets
-    timeshift_counter = Counter([onsets_padded[i + 1] - onsets_padded[i] for i in range(len(onsets_padded) - 1)])
+    timeshift_counter = Counter(
+        [onsets_padded[i + 1] - onsets_padded[i] for i in range(len(onsets_padded) - 1)]
+    )
     duration_counter = Counter([c[1] for c in compounds])
-    onsets_exceed_vocab_size = any(key > onset_vocab_size - 3 for key in timeshift_counter.keys())
-    duration_exceed_vocab_size = any(key > dur_vocab_size - 3 for key in duration_counter.keys())
-    return onsets_exceed_vocab_size, duration_exceed_vocab_size, timeshift_counter, duration_counter
+    onsets_exceed_vocab_size = any(
+        key > onset_vocab_size - 3 for key in timeshift_counter.keys()
+    )
+    duration_exceed_vocab_size = any(
+        key > dur_vocab_size - 3 for key in duration_counter.keys()
+    )
+    return (
+        onsets_exceed_vocab_size,
+        duration_exceed_vocab_size,
+        timeshift_counter,
+        duration_counter,
+    )
 
 
-def filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file):
-    onsets_exceed_vocab_size, duration_exceed_vocab_size, timeshift_counter, duration_counter = detect_large_timeshifts_and_durations(
-        compounds, onset_vocab_size, dur_vocab_size)
+def filter_large_ts_dur(
+    compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file
+):
+    (
+        onsets_exceed_vocab_size,
+        duration_exceed_vocab_size,
+        timeshift_counter,
+        duration_counter,
+    ) = detect_large_timeshifts_and_durations(
+        compounds, onset_vocab_size, dur_vocab_size
+    )
 
     if onsets_exceed_vocab_size or duration_exceed_vocab_size:
-        with open(log_file, 'a') as log:
-            log.write(f'Failed to process {output_file_path}:\n')
+        with open(log_file, "a") as log:
+            log.write(f"Failed to process {output_file_path}:\n")
             log.write(
-                f'{output_file_path} contains large onsets: {onsets_exceed_vocab_size}, large durations: {duration_exceed_vocab_size}\n')
+                f"{output_file_path} contains large onsets: {onsets_exceed_vocab_size}, large durations: {duration_exceed_vocab_size}\n"
+            )
             if onsets_exceed_vocab_size:
-                largest_onset = max(key for key in timeshift_counter.keys() if key > onset_vocab_size - 3)
-                log.write(f'Largest onset: {largest_onset}\n')
+                largest_onset = max(
+                    key
+                    for key in timeshift_counter.keys()
+                    if key > onset_vocab_size - 3
+                )
+                log.write(f"Largest onset: {largest_onset}\n")
             if duration_exceed_vocab_size:
-                largest_duration = max(key for key in duration_counter.keys() if key > dur_vocab_size - 3)
-                log.write(f'Largest duration: {largest_duration}\n')
+                largest_duration = max(
+                    key for key in duration_counter.keys() if key > dur_vocab_size - 3
+                )
+                log.write(f"Largest duration: {largest_duration}\n")
         return None
     else:
         return {
-            'file': output_file_path,
-            'compounds': compounds,
-            'split': split,
-            'timeshifts': dict(timeshift_counter),
-            'durations': dict(duration_counter),
-            'length_token': len(compounds),
-            'length_duration': compounds[-1][0] + compounds[-1][1],
+            "file": output_file_path,
+            "compounds": compounds,
+            "split": split,
+            "timeshifts": dict(timeshift_counter),
+            "durations": dict(duration_counter),
+            "length_token": len(compounds),
+            "length_duration": compounds[-1][0] + compounds[-1][1],
         }
 
 
 # 修改点 2: 增加了 tokenizer 参数
-def process_midi_file_v2(midi_file, split, onset_vocab_size, dur_vocab_size, output_folder, log_file, tokenizer,
-                         silence_threshold=None):
+def process_midi_file_v2(
+    midi_file,
+    split,
+    onset_vocab_size,
+    dur_vocab_size,
+    output_folder,
+    log_file,
+    tokenizer,
+    silence_threshold=None,
+):
     # 现在使用的是作为参数传进来的 tokenizer
     compounds = tokenizer.midi_to_compound(midi_file)
     base_filename = os.path.splitext(os.path.basename(midi_file))[0] + ".npy"
@@ -161,27 +220,62 @@ def process_midi_file_v2(midi_file, split, onset_vocab_size, dur_vocab_size, out
     if silence_threshold:
         list_of_compounds = chunk_compounds(compounds, threshold=silence_threshold)
         if len(list_of_compounds) == 1:
-            return [filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file)]
+            return [
+                filter_large_ts_dur(
+                    compounds,
+                    output_file_path,
+                    split,
+                    onset_vocab_size,
+                    dur_vocab_size,
+                    log_file,
+                )
+            ]
         else:
             list_of_output_file_path = [
-                os.path.join(output_folder, os.path.splitext(os.path.basename(midi_file))[0] + f'_{i}.npy')
+                os.path.join(
+                    output_folder,
+                    os.path.splitext(os.path.basename(midi_file))[0] + f"_{i}.npy",
+                )
                 for i in range(len(list_of_compounds))
             ]
-            return [filter_large_ts_dur(comp, out_path, split, onset_vocab_size, dur_vocab_size, log_file)
-                    for (comp, out_path) in zip(list_of_compounds, list_of_output_file_path)]
+            return [
+                filter_large_ts_dur(
+                    comp, out_path, split, onset_vocab_size, dur_vocab_size, log_file
+                )
+                for (comp, out_path) in zip(list_of_compounds, list_of_output_file_path)
+            ]
     else:
-        return [filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file)]
+        return [
+            filter_large_ts_dur(
+                compounds,
+                output_file_path,
+                split,
+                onset_vocab_size,
+                dur_vocab_size,
+                log_file,
+            )
+        ]
 
 
 def analyze(processed_midis):
     timeshift_counts_list, duration_counts_list, file_length_counts_list = zip(
-        *[[midi['timeshifts'], midi['durations'], {midi['length_token']: 1}] for midi in processed_midis])
-    total_duration = sum([midi['length_duration'] for midi in processed_midis])
-    total_length = sum([midi['length_token'] for midi in processed_midis])
+        *[
+            [midi["timeshifts"], midi["durations"], {midi["length_token"]: 1}]
+            for midi in processed_midis
+        ]
+    )
+    total_duration = sum([midi["length_duration"] for midi in processed_midis])
+    total_length = sum([midi["length_token"] for midi in processed_midis])
     timeshift_counts = merge_dictionaries_parallel(timeshift_counts_list)
     duration_counts = merge_dictionaries_parallel(duration_counts_list)
     file_length_counts = merge_dictionaries_parallel(file_length_counts_list)
-    return timeshift_counts, duration_counts, file_length_counts, total_duration, total_length
+    return (
+        timeshift_counts,
+        duration_counts,
+        file_length_counts,
+        total_duration,
+        total_length,
+    )
 
 
 def merge_dicts_chunk(chunk):
@@ -195,10 +289,16 @@ def merge_dicts_chunk(chunk):
 def merge_dictionaries_parallel(dicts):
     num_chunks = len(dicts)
     chunk_size = max(num_chunks // num_cores, 1)
-    chunks = [dicts[i:i + chunk_size] for i in range(0, num_chunks, chunk_size)]
+    chunks = [dicts[i : i + chunk_size] for i in range(0, num_chunks, chunk_size)]
 
     with ProcessPoolExecutor(max_workers=num_cores) as executor:
-        merged_dicts = list(tqdm(executor.map(merge_dicts_chunk, chunks), total=len(chunks), desc='Merging Dict'))
+        merged_dicts = list(
+            tqdm(
+                executor.map(merge_dicts_chunk, chunks),
+                total=len(chunks),
+                desc="Merging Dict",
+            )
+        )
 
     result = {}
     for merged_dict in merged_dicts:
@@ -208,12 +308,14 @@ def merge_dictionaries_parallel(dicts):
     return result_sorted
 
 
-def plot_histogram(input_dict, x_label, y_label, title, xscale='log', save_path='path/to/save'):
+def plot_histogram(
+    input_dict, x_label, y_label, title, xscale="log", save_path="path/to/save"
+):
     plt.figure(figsize=(12, 6))
     keys = list(input_dict.keys())
     values = list(input_dict.values())
     num_bins = 100
-    plt.hist(keys, bins=num_bins, weights=values, edgecolor='black')
+    plt.hist(keys, bins=num_bins, weights=values, edgecolor="black")
     plt.xscale(xscale)
     plt.title(title)
     plt.xlabel(x_label)
@@ -224,7 +326,7 @@ def plot_histogram(input_dict, x_label, y_label, title, xscale='log', save_path=
 
 
 # Main script execution
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = SimpleNamespace(
         dataset_name="SymbTrv3",
         dataset_folder="data/symbtr",
@@ -234,7 +336,7 @@ if __name__ == '__main__':
         train_test_split_file=None,
         ts_threshold=None,
         microtonal=True,
-        pitchbend_sensitivity=2.0
+        pitchbend_sensitivity=2.0,
     )
 
     midi_output_folder = args.output_folder + "/processed"
@@ -246,25 +348,28 @@ if __name__ == '__main__':
 
     if args.train_ratio == 1:
         midi_files = find_midi_files(args.dataset_folder)
-        splits = ['train'] * len(midi_files)
+        splits = ["train"] * len(midi_files)
         print(f"{len(midi_files)} midi files found! all assigned to the train split")
     elif args.train_ratio == 0:
         midi_files = find_midi_files(args.dataset_folder)
-        splits = ['test'] * len(midi_files)
+        splits = ["test"] * len(midi_files)
         print(f"{len(midi_files)} midi files found! all assigned to the test split")
     else:
         if args.train_test_split_file:
-            midi_files, splits = find_midi_files_from_file(args.dataset_name, args.train_test_split_file,
-                                                           args.dataset_folder)
+            midi_files, splits = find_midi_files_from_file(
+                args.dataset_name, args.train_test_split_file, args.dataset_folder
+            )
         else:
             midi_files = find_midi_files(args.dataset_folder)
-            train_files, test_files = train_test_split(midi_files, train_size=args.train_ratio, random_state=42)
-            splits = ['train'] * len(train_files) + ['test'] * len(test_files)
+            train_files, test_files = train_test_split(
+                midi_files, train_size=args.train_ratio, random_state=42
+            )
+            splits = ["train"] * len(train_files) + ["test"] * len(test_files)
             midi_files = train_files + test_files
 
     file_labels = [parse_symbtr_labels(os.path.basename(f)) for f in midi_files]
 
-    with open(args.model_config, 'r') as file:
+    with open(args.model_config, "r") as file:
         data = json.load(file)
         onset_vocab_size = data.get("onset_vocab_size", None)
         dur_vocab_size = data.get("dur_vocab_size", None)
@@ -276,10 +381,13 @@ if __name__ == '__main__':
         assert onset_vocab_size and dur_vocab_size
 
     print(
-        f"processing using {num_cores} cpus. tokenizer config: max timeshift allowed: {onset_vocab_size - 3}, max duration allowed: {dur_vocab_size - 3}")
+        f"processing using {num_cores} cpus. tokenizer config: max timeshift allowed: {onset_vocab_size - 3}, max duration allowed: {dur_vocab_size - 3}"
+    )
     if args.microtonal:
-        print(f"Microtonal mode ENABLED (pitchbend_sensitivity={args.pitchbend_sensitivity}). "
-              f"Pitch will be encoded as cents (0-1199); pitch_class_vocab_size={pitch_class_vocab_size}.")
+        print(
+            f"Microtonal mode ENABLED (pitchbend_sensitivity={args.pitchbend_sensitivity}). "
+            f"Pitch will be encoded as cents (0-1199); pitch_class_vocab_size={pitch_class_vocab_size}."
+        )
 
     tokenizer = MusicTokenizer(
         timeshift_vocab_size=onset_vocab_size,
@@ -293,46 +401,60 @@ if __name__ == '__main__':
         microtonal_resolution=microtonal_resolution,
     )
 
-    with open(csv_file_path, 'w', newline='') as csvfile:
+    with open(csv_file_path, "w", newline="") as csvfile:
         csv_writer = csv.writer(csvfile)
-        csv_writer.writerow([
-            'file_base_name', 'split', 'length', 'duration',
-            'makam', 'form', 'usul', 'title', 'artist',
-        ])
+        csv_writer.writerow(
+            [
+                "file_base_name",
+                "split",
+                "length",
+                "duration",
+                "makam",
+                "form",
+                "usul",
+                "title",
+                "artist",
+            ]
+        )
 
         # 修改点 3: 将 tokenizer 加入到 executor.map 中传递给子进程
         with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            all_results = list(tqdm(
-                executor.map(
-                    process_midi_file_safe_v2,
-                    midi_files,
-                    splits,
-                    [onset_vocab_size] * len(midi_files),
-                    [dur_vocab_size] * len(midi_files),
-                    [midi_output_folder] * len(midi_files),
-                    [log_file] * len(midi_files),
-                    [tokenizer] * len(midi_files),  # 传入 tokenizer
-                    [args.ts_threshold] * len(midi_files),
-                ),
-                total=len(midi_files),
-                desc="Processing MIDI files",
-            ))
+            all_results = list(
+                tqdm(
+                    executor.map(
+                        process_midi_file_safe_v2,
+                        midi_files,
+                        splits,
+                        [onset_vocab_size] * len(midi_files),
+                        [dur_vocab_size] * len(midi_files),
+                        [midi_output_folder] * len(midi_files),
+                        [log_file] * len(midi_files),
+                        [tokenizer] * len(midi_files),  # 传入 tokenizer
+                        [args.ts_threshold] * len(midi_files),
+                    ),
+                    total=len(midi_files),
+                    desc="Processing MIDI files",
+                )
+            )
 
         for labels_dict, result in zip(file_labels, all_results):
             if result is not None:
                 for sublist in result:
                     if sublist is not None:
-                        csv_writer.writerow([
-                            os.path.basename(sublist['file']),
-                            sublist['split'],
-                            sublist['length_token'],
-                            sublist['length_duration'],
-                            labels_dict['makam'],
-                            labels_dict['form'],
-                            labels_dict['usul'],
-                            labels_dict['title'],
-                            labels_dict['artist'],
-                        ])
+                        csv_writer.writerow(
+                            [
+                                os.path.basename(sublist["file"]),
+                                sublist["split"],
+                                sublist["length_token"],
+                                sublist["length_duration"],
+                                labels_dict["makam"],
+                                labels_dict["form"],
+                                labels_dict["usul"],
+                                labels_dict["title"],
+                                labels_dict["artist"],
+                            ]
+                        )
 
     print(
-        f'Processed {len(midi_files)} files. Results saved to {csv_file_path}, with {pd.read_csv(csv_file_path).shape[0]} successes. Success ratio: {pd.read_csv(csv_file_path).shape[0] / len(midi_files) * 100:.2f}%')
+        f"Processed {len(midi_files)} files. Results saved to {csv_file_path}, with {pd.read_csv(csv_file_path).shape[0]} successes. Success ratio: {pd.read_csv(csv_file_path).shape[0] / len(midi_files) * 100:.2f}%"
+    )
