@@ -21,6 +21,7 @@ chardet
 openai
 mido
 pytest
+music21
 
 #typing-extensions==4.8.0
 typing-extensions>=4.10.0
