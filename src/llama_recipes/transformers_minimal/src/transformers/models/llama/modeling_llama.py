@@ -1723,6 +1723,7 @@ class LlamaModel(LlamaPreTrainedModel):
         super().__init__(config)
         self.sos_token = config.sos_token
         self.eos_token = config.eos_token
+        self.pad_token = config.pad_token_id
 
         # self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx) #Llama's implementation of word embedding
 
@@ -1799,6 +1800,7 @@ class LlamaModel(LlamaPreTrainedModel):
         # Detect SOS and EOS:
         where_sos = (input_ids[:, :, 0] == self.sos_token).unsqueeze(-1)
         where_eos = (input_ids[:, :, 0] == self.eos_token).unsqueeze(-1)
+        where_pad = (input_ids[:, :, 0] == self.pad_token).unsqueeze(-1)
 
         # Handle new tokens if provided
         if additional_token_map is not None:
@@ -1818,9 +1820,9 @@ class LlamaModel(LlamaPreTrainedModel):
                     torch.tensor(embed_idx).to(input_ids.device)
                 )[None, None, ...].expand(input_ids.size(0), -1, -1)
 
-        # Since SOS and EOS are negative number, temporarily change it to 0 to avoid indexing error
+        # Special tokens are negative numbers; map them to a safe placeholder before embeddings.
         input_ids_tmp = torch.where(
-            (where_sos | where_eos),
+            (where_sos | where_eos | where_pad),
             torch.tensor([0 for _ in range(6)]).to(input_ids),
             input_ids,
         )

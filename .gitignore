@@ -49,3 +49,6 @@ slurm/
 models/
 data_processed/
 checkpoints/
+data/
+.venv/
+.idea/

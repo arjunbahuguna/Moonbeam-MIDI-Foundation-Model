@@ -107,6 +107,38 @@ def _move_batch_to_device(batch, device):
     return moved
 
 
+def _create_optimizer(model, train_cfg, device):
+    """Choose an optimizer that fits available VRAM on small GPUs."""
+    adamw = optim.AdamW(
+        model.parameters(),
+        lr=train_cfg.lr,
+        weight_decay=train_cfg.weight_decay,
+    )
+
+    if device.type != "cuda":
+        return adamw, "adamw"
+
+    trainable_numel = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    adam_state_bytes = trainable_numel * 2 * 4  # exp_avg + exp_avg_sq in fp32
+    free_bytes, _ = torch.cuda.mem_get_info()
+
+    # Keep headroom for allocator fragmentation and transient kernels.
+    if adam_state_bytes > int(0.85 * free_bytes):
+        print(
+            "Low-VRAM mode: switching optimizer to SGD "
+            f"(AdamW state would need ~{adam_state_bytes / (1024**3):.2f} GiB, "
+            f"free ~{free_bytes / (1024**3):.2f} GiB)."
+        )
+        sgd = optim.SGD(
+            model.parameters(),
+            lr=train_cfg.lr,
+            weight_decay=train_cfg.weight_decay,
+        )
+        return sgd, "sgd"
+
+    return adamw, "adamw"
+
+
 def evaluate_classification(model, dataloader, device):
     model.eval()
     total_loss = 0.0
@@ -165,6 +197,7 @@ def train_classification(
         epoch_loss_sum = 0.0
         epoch_steps = 0
         optimizer.zero_grad()
+        reached_max_steps = False
 
         for step, batch in enumerate(train_dataloader):
             model.train()
@@ -222,6 +255,20 @@ def train_classification(
                             ckpt_path,
                         )
                         print(f"Saved best checkpoint to {ckpt_path}")
+
+            if int(train_cfg.max_train_step) > 0 and global_step >= int(
+                train_cfg.max_train_step
+            ):
+                reached_max_steps = True
+                break
+
+        if reached_max_steps:
+            scheduler.step()
+            epoch_train_loss = epoch_loss_sum / max(1, epoch_steps)
+            running_train_losses.append(epoch_train_loss)
+            print(f"epoch={epoch} train_loss={epoch_train_loss:.6f}")
+            print(f"Reached max_train_step={train_cfg.max_train_step}; stopping early.")
+            break
 
         scheduler.step()
         epoch_train_loss = epoch_loss_sum / max(1, epoch_steps)
@@ -399,11 +446,8 @@ def main(**kwargs):
         )
         train_cfg.run_validation = False
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=train_cfg.lr,
-        weight_decay=train_cfg.weight_decay,
-    )
+    optimizer, optimizer_name = _create_optimizer(model, train_cfg, device)
+    print(f"Using optimizer: {optimizer_name}")
     scheduler = StepLR(optimizer, step_size=1, gamma=train_cfg.gamma)
 
     results = train_classification(

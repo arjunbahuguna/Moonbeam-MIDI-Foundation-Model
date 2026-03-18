@@ -186,6 +186,12 @@ class DynamicCache(Cache):
         return cache
 
 
+class EncoderDecoderCache(DynamicCache):
+    """Compatibility alias used by recent PEFT versions."""
+
+    pass
+
+
 class SinkCache(Cache):
     """
     A cache that as described in the [Attention Sinks paper](https://arxiv.org/abs/2309.17453). It allows the model to
