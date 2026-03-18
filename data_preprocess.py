@@ -13,7 +13,8 @@ import argparse
 import csv
 from sklearn.model_selection import train_test_split
 import pandas as pd
-num_cores = multiprocessing.cpu_count()
+
+# num_cores will be set after parsing args
 
 
 def parse_symbtr_labels(filename):
@@ -172,13 +173,13 @@ def process_midi_file_v2(midi_file, split, onset_vocab_size, dur_vocab_size, out
     else:
         return [filter_large_ts_dur(compounds, output_file_path, split, onset_vocab_size, dur_vocab_size, log_file)]
 
-def analyze(processed_midis):
+def analyze(processed_midis, num_cores):
     timeshift_counts_list, duration_counts_list, file_length_counts_list = zip(*[[midi['timeshifts'], midi['durations'], {midi['length_token']:1}] for midi in processed_midis])
     total_duration = sum([midi['length_duration'] for midi in processed_midis])
     total_length = sum([midi['length_token'] for midi in processed_midis])
-    timeshift_counts = merge_dictionaries_parallel(timeshift_counts_list) #TODO: check correctness
-    duration_counts = merge_dictionaries_parallel(duration_counts_list)
-    file_length_counts = merge_dictionaries_parallel(file_length_counts_list)
+    timeshift_counts = merge_dictionaries_parallel(timeshift_counts_list, num_cores) #TODO: check correctness
+    duration_counts = merge_dictionaries_parallel(duration_counts_list, num_cores)
+    file_length_counts = merge_dictionaries_parallel(file_length_counts_list, num_cores)
     return timeshift_counts, duration_counts, file_length_counts, total_duration, total_length
 
 def merge_dicts_chunk(chunk):
@@ -188,7 +189,7 @@ def merge_dicts_chunk(chunk):
             result[key] = result.get(key, 0) + value
     return result
 
-def merge_dictionaries_parallel(dicts):
+def merge_dictionaries_parallel(dicts, num_cores):
     # Split dicts into chunks for parallel processing
     num_chunks = len(dicts)
     chunk_size = max(num_chunks // num_cores, 1)
@@ -240,7 +241,10 @@ if __name__ == '__main__':
     parser.add_argument('--pitchbend_sensitivity', type=float, default=2.0,
                         help='Pitchbend range in semitones (default: 2.0, matches SymbTr convention).')
 
+    parser.add_argument('--num_workers', type=int, default=None, help='Number of parallel workers to use for preprocessing (default: all available CPUs)')
     args = parser.parse_args()
+
+    num_cores = args.num_workers if args.num_workers is not None else multiprocessing.cpu_count()
 
     #get file paths
     midi_output_folder = args.output_folder+"/processed"

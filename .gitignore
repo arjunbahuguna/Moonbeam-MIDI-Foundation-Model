@@ -38,5 +38,3 @@ wandb/
 *.sh
 *.err
 *.out
-slurm/
-

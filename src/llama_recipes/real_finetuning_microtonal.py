@@ -63,6 +63,17 @@ def setup_wandb(train_config, fsdp_config, llama_config, **kwargs):
     wandb_config = WANDB_CONFIG()
     update_config(wandb_config, **kwargs)
     init_dict = dataclasses.asdict(wandb_config)
+    
+    # Project-specific identifiers
+    init_dict["entity"] = "microtok"
+    init_dict["project"] = "uncon_gen"
+
+    # Add run name and tags for better organization and filtering in the wandb dashboard
+    # Include config values for easy reference
+    init_dict["name"] = "data_mixing" # Optional: set a custom run name for easier identification in the dashboard]
+    init_dict["tags"] = ["309M", "symbtr_lmd"]
+
+    # Initialize and configure wandb
     run = wandb.init(**init_dict)
     run.config.update(train_config)
     run.config.update(fsdp_config, allow_val_change=True)
@@ -351,6 +362,9 @@ def main(**kwargs):
             data_dir=train_config.western_data_dir,
             csv_file=train_config.western_csv_file,
         )
+
+        # Only LakhDataset is currently supported for western replay mixing
+        # Can add more as needed
         western_train = LakhDataset(western_config, tokenizer, partition="train")
         if not train_config.enable_fsdp or rank == 0:
             print(f"--> Western Replay Set Length = {len(western_train)}")
