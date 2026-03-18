@@ -34,8 +34,8 @@ class MakamClassificationDataset(Dataset):
         file_path = os.path.join(self.data_dir, "processed", file_name)
         raw_tokens = np.load(file_path)
 
-        # Encode with special tokens for classification
-        encoded_tokens = self.tokenizer.encode_series_player_classification(
+        # Pure classifier path: no conditioning token is injected into inputs.
+        encoded_tokens = self.tokenizer.encode_series(
             raw_tokens,
             if_add_sos=True,
             if_add_eos=True,
@@ -43,7 +43,7 @@ class MakamClassificationDataset(Dataset):
 
         # Truncate if exceeding max length
         if len(encoded_tokens) > self.max_words:
-            encoded_tokens = encoded_tokens[:self.max_words]
+            encoded_tokens = encoded_tokens[: self.max_words]
 
         input_ids = torch.tensor(encoded_tokens, dtype=torch.long)
 
