@@ -8,6 +8,7 @@ import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import f1_score
+from peft import LoraConfig, get_peft_model, TaskType
 
 from llama_recipes.configs import train_config as TRAIN_CONFIG
 from llama_recipes.configs import fsdp_config as FSDP_CONFIG
@@ -173,8 +174,13 @@ def train_classification(
             loss.backward()
 
             if (step + 1) % grad_acc_steps == 0 or (step + 1) == len(train_dataloader):
-                if train_cfg.gradient_clipping and train_cfg.gradient_clipping_threshold > 0.0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.gradient_clipping_threshold)
+                if (
+                    train_cfg.gradient_clipping
+                    and train_cfg.gradient_clipping_threshold > 0.0
+                ):
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), train_cfg.gradient_clipping_threshold
+                    )
                 optimizer.step()
                 optimizer.zero_grad()
 
@@ -202,7 +208,9 @@ def train_classification(
                     best_macro_f1 = metrics["eval_macro_f1"]
                     best_metrics = metrics
                     if train_cfg.save_model:
-                        ckpt_path = os.path.join(train_cfg.output_dir, "best_makam_classifier.pt")
+                        ckpt_path = os.path.join(
+                            train_cfg.output_dir, "best_makam_classifier.pt"
+                        )
                         torch.save(
                             {
                                 "model_state_dict": model.state_dict(),
@@ -232,7 +240,9 @@ def train_classification(
                 best_macro_f1 = metrics["eval_macro_f1"]
                 best_metrics = metrics
                 if train_cfg.save_model:
-                    ckpt_path = os.path.join(train_cfg.output_dir, "best_makam_classifier.pt")
+                    ckpt_path = os.path.join(
+                        train_cfg.output_dir, "best_makam_classifier.pt"
+                    )
                     torch.save(
                         {
                             "model_state_dict": model.state_dict(),
@@ -248,8 +258,12 @@ def train_classification(
     results = {
         "avg_train_loss": sum(running_train_losses) / max(1, len(running_train_losses)),
         "best_eval_macro_f1": best_macro_f1 if best_metrics is not None else None,
-        "best_eval_accuracy": best_metrics["eval_accuracy"] if best_metrics is not None else None,
-        "best_eval_loss": best_metrics["eval_loss"] if best_metrics is not None else None,
+        "best_eval_accuracy": (
+            best_metrics["eval_accuracy"] if best_metrics is not None else None
+        ),
+        "best_eval_loss": (
+            best_metrics["eval_loss"] if best_metrics is not None else None
+        ),
         "total_steps": global_step,
     }
     return results
@@ -333,6 +347,23 @@ def main(**kwargs):
     print(f"label_map_path={label_map_path}")
     print(f"num_labels={num_labels}")
 
+    # LoRA adapter configuration
+    if bool(train_cfg.enable_lora):
+        lora_config = LoraConfig(
+            task_type=TaskType.SEQ_CLS,
+            inference_mode=False,
+            r=train_cfg.lora_r,
+            lora_alpha=train_cfg.lora_alpha,
+            lora_dropout=train_cfg.lora_dropout,
+            target_modules=["q_proj", "v_proj"],  # attention heads
+            bias="none",
+        )
+        model = get_peft_model(model, lora_config)
+        print(
+            f"LoRA enabled: r={train_cfg.lora_r}, alpha={train_cfg.lora_alpha}, dropout={train_cfg.lora_dropout}"
+        )
+        model.print_trainable_parameters()
+
     ds_train = get_preprocessed_dataset(tokenizer, dataset_config, split="train")
     ds_val = get_preprocessed_dataset(tokenizer, dataset_config, split="test")
     print(f"--> Training Set Length = {len(ds_train)}")
@@ -346,7 +377,7 @@ def main(**kwargs):
         collate_fn=collator,
         num_workers=train_cfg.num_workers_dataloader,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,
     )
 
     eval_dataloader = torch.utils.data.DataLoader(
@@ -356,8 +387,17 @@ def main(**kwargs):
         collate_fn=collator,
         num_workers=train_cfg.num_workers_dataloader,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,
     )
+
+    if train_cfg.run_validation and len(eval_dataloader) == 0:
+        print(
+            f"WARNING: Validation set has {len(ds_val)} samples, but batch size is {train_cfg.val_batch_size}."
+        )
+        print(
+            "  Validation will be skipped. Consider reducing batch size or disabling run_validation."
+        )
+        train_cfg.run_validation = False
 
     optimizer = optim.AdamW(
         model.parameters(),

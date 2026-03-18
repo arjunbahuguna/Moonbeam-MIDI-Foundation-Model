@@ -185,6 +185,26 @@ To finetune a music classification model, update the following configuration fil
 | `emopia`           | 130                   | 133                        | q, k                | 2.00E-04      | 4                 |
 | `Giant_Piano_MIDI` | 1200                  | 1203                       | q, k, v, o          | 2.40E-04      | 30                |
 
+#### Finetunning
+python recipes/inference/local_inference/makam_classification.py \
+  --checkpoint_path models/moonbeam_309M.pt \
+  --npy_path data/processed_data_symbtr/processed/hicaz--sarki--duyek--sevmiyorum_seni--avni_anil.npy \
+  --seq_len 128 \
+  --window_stride 64 \
+  --aggregation mean
+
+  ###### Error during finetunning
+  from accelerate.utils import is_xpu_available, is_ccl_available
+  ImportError: cannot import name 'is_ccl_available' from 'accelerate.utils' (/home/julian/proyectos/smc-master/computational-musicology/Moonbeam-MIDI-Foundation-Model/.venv/lib/python3.13/site-packages/accelerate/utils/__init__.py). Did you mean: 'is_rich_available'?
+
+#### Inference
+python recipes/inference/local_inference/makam_classification.py \
+  --checkpoint_path models/moonbeam_309M.pt \
+  --npy_path data/processed_data_symbtr/processed/hicaz--sarki--duyek--sevmiyorum_seni--avni_anil.npy \
+  --seq_len 128 \
+  --window_stride 64 \
+  --aggregation mean
+
 #### Configuration Files to Update:
 - `src/llama_recipes/configs/player_classification_config.json`: Set `num_classes` to the "Number of Classes" from the table.
 - `src/llama_recipes/configs/dataset.py` (in `player_classification_dataset` class):
