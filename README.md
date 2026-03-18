@@ -186,16 +186,26 @@ To finetune a music classification model, update the following configuration fil
 | `Giant_Piano_MIDI` | 1200                  | 1203                       | q, k, v, o          | 2.40E-04      | 30                |
 
 #### Finetunning
-python recipes/inference/local_inference/makam_classification.py \
-  --checkpoint_path models/moonbeam_309M.pt \
-  --npy_path data/processed_data_symbtr/processed/hicaz--sarki--duyek--sevmiyorum_seni--avni_anil.npy \
-  --seq_len 128 \
-  --window_stride 64 \
-  --aggregation mean
+python recipes/finetuning/real_finetuning_makam_classification.py \
+  --dataset symbtr_dataset_eval \
+  --trained_checkpoint_path models/moonbeam_309M.pt \
+  --output_dir checkpoints/finetuned_checkpoints/makam_full_run \
+  --batch_size_training 8 \
+  --val_batch_size 8 \
+  --num_epochs 5 \
+  --validation_interval 200 \
+  --lr 2e-4 \
+  --weight_decay 0.01 \
+  --gamma 0.9 \
+  --gradient_accumulation_steps 2 \
+  --enable_lora true \
+  --lora_r 16 \
+  --lora_alpha 32 \
+  --lora_dropout 0.05 \
+  --run_validation true \
+  --save_model true \
+  --save_metrics true
 
-  ###### Error during finetunning
-  from accelerate.utils import is_xpu_available, is_ccl_available
-  ImportError: cannot import name 'is_ccl_available' from 'accelerate.utils' (/home/julian/proyectos/smc-master/computational-musicology/Moonbeam-MIDI-Foundation-Model/.venv/lib/python3.13/site-packages/accelerate/utils/__init__.py). Did you mean: 'is_rich_available'?
 
 #### Inference
 python recipes/inference/local_inference/makam_classification.py \
