@@ -72,12 +72,7 @@ class MusicTokenizer():
         # self.sos_dur, self.eos_dur = 1025, 1026 #TODO: very ugly fix!! #IF CONVERT TO LINEAR THEN HAVE TO CHANGE THIS BACK
 
         self.sos_octave, self.eos_octave = self.octave_vocab_size-2, self.octave_vocab_size-1
-        if self.microtonal:
-            # SOS/EOS pitch compound values are always 1200/1201 (special markers,
-            # not real cent values). For non-microtonal, they're pitch_class_vocab_size-2/-1
-            self.sos_pitch_class, self.eos_pitch_class = 1200, 1201
-        else:
-            self.sos_pitch_class, self.eos_pitch_class = self.pitch_class_vocab_size-2, self.pitch_class_vocab_size-1
+        self.sos_pitch_class, self.eos_pitch_class = self.pitch_class_vocab_size-2, self.pitch_class_vocab_size-1
         self.sos_instrument, self.eos_instrument = self.instrument_vocab_size-2, self.instrument_vocab_size-1
         self.sos_velocity, self.eos_velocity = self.velocity_vocab_size-2, self.velocity_vocab_size-1
 

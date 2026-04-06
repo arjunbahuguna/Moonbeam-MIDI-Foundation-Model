@@ -24,6 +24,12 @@ import json
 from llama_recipes.model_checkpointing import save_model_checkpoint, save_model_and_optimizer_sharded, save_optimizer_checkpoint, save_model_checkpoint_ddp, save_peft_checkpoint
 from llama_recipes.policies import fpSixteen,bfSixteen, get_llama_wrapper
 from llama_recipes.utils.memory_utils import MemoryTrace
+from llama_recipes.utils.pitch_confusion_utils import (
+    init_pitch_confusion_state,
+    update_pitch_confusions,
+    save_pitch_confusion_artifacts,
+    compute_western_drift_metrics,
+)
 # from accelerate.utils import is_xpu_available, is_ccl_available
 try:
     from accelerate.utils import is_xpu_available, is_ccl_available
@@ -119,6 +125,8 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
     best_val_loss = float("inf")
     total_train_steps = 0
     max_steps_reached = False  # Flag to indicate max training steps reached
+
+
     # Start the training loop
     for epoch in range(starting_epoch, train_config.num_epochs):
         # stop when the maximum number of training steps is reached
@@ -316,6 +324,7 @@ def train(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_sche
             save_to_json(metrics_filename, train_step_loss, train_loss, train_step_perplexity, train_prep, val_step_loss, val_loss, val_step_perplexity, val_prep)
 
     avg_epoch_time = sum(epoch_times)/ len(epoch_times)
+
     avg_checkpoint_time = sum(checkpoint_times)/ len(checkpoint_times) if len(checkpoint_times) > 0 else 0
     avg_train_prep = sum(train_prep)/len(train_prep)
     avg_train_loss = sum(train_loss)/len(train_loss)
@@ -386,6 +395,7 @@ def train_overfit(model, batch, train_dataloader,eval_dataloader, tokenizer, opt
     best_val_loss = float("inf")
     total_train_steps = 0
     max_steps_reached = False  # Flag to indicate max training steps reached
+
     # Start the training loop
     for epoch in range(train_config.num_epochs):
         # stop when the maximum number of training steps is reached
@@ -605,6 +615,7 @@ def train_overfit(model, batch, train_dataloader,eval_dataloader, tokenizer, opt
             save_to_json(metrics_filename, train_step_loss, train_loss, train_step_perplexity, train_prep, val_step_loss, val_loss, val_step_perplexity, val_prep)
 
     avg_epoch_time = sum(epoch_times)/ len(epoch_times)
+
     avg_checkpoint_time = sum(checkpoint_times)/ len(checkpoint_times) if len(checkpoint_times) > 0 else 0
     avg_train_prep = sum(train_prep)/len(train_prep)
     avg_train_loss = sum(train_loss)/len(train_loss)
@@ -629,7 +640,40 @@ def train_overfit(model, batch, train_dataloader,eval_dataloader, tokenizer, opt
 
     return results
 
-def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_scheduler, starting_epoch, starting_step,gradient_accumulation_steps, train_config, fsdp_config=None, ddp_config=None, local_rank=None, rank=None, wandb_run=None, microtonal_reg=None):
+
+def _should_run_pitch_confusion(train_config, rank=None):
+    if not getattr(train_config, 'enable_pitch_confusion', False):
+        return False
+    if train_config.enable_fsdp or train_config.enable_ddp:
+        return rank == 0
+    return True
+
+
+def _maybe_log_pitch_confusion_to_wandb(train_config, wandb_run, artifacts, metrics, step):
+    if wandb_run is None or not getattr(train_config, 'pitch_confusion_log_wandb', True):
+        return
+    try:
+        import wandb
+    except ImportError:
+        return
+
+    log_dict = {}
+    if os.path.exists(artifacts['overall_counts_png']):
+        log_dict['pitch_confusion/overall_counts'] = wandb.Image(artifacts['overall_counts_png'])
+    if os.path.exists(artifacts['overall_row_norm_png']):
+        log_dict['pitch_confusion/overall_row_norm'] = wandb.Image(artifacts['overall_row_norm_png'])
+    if os.path.exists(artifacts['western_counts_png']):
+        log_dict['pitch_confusion/western12_counts'] = wandb.Image(artifacts['western_counts_png'])
+    if os.path.exists(artifacts['western_row_norm_png']):
+        log_dict['pitch_confusion/western12_row_norm'] = wandb.Image(artifacts['western_row_norm_png'])
+
+    for k, v in metrics.items():
+        log_dict[f'pitch_confusion/{k}'] = v
+
+    if log_dict:
+        wandb_run.log(log_dict, step=step)
+
+def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer, lr_scheduler, starting_epoch, starting_step,gradient_accumulation_steps, train_config, fsdp_config=None, ddp_config=None, local_rank=None, rank=None, wandb_run=None, microtonal_reg=None, pitch_confusion_ctx=None):
     """
     Trains the model on the given dataloader
 
@@ -648,6 +692,8 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
             When provided, adds two auxiliary losses: L_anchor (MSE penalty preventing
             pretrained western pitch embeddings from drifting) and L_smooth (encourages
             adjacent cent-resolution pitch bins to have similar embeddings).
+        pitch_confusion_ctx: Optional dict controlling confusion snapshots and
+            western pre/post drift evaluation.
 
     Returns: results dictionary containing average training and validation perplexity and loss
     """
@@ -680,6 +726,48 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
     best_val_loss = float("inf")
     total_train_steps = 0
     max_steps_reached = False  # Flag to indicate max training steps reached
+
+    confusion_active = _should_run_pitch_confusion(train_config, rank)
+    confusion_save_dir = (
+        train_config.pitch_confusion_dir
+        if getattr(train_config, 'pitch_confusion_dir', '')
+        else os.path.join(train_config.output_dir, 'pitch_confusion')
+    )
+    overall_snapshot_epochs = set()
+    western_pre_matrix = None
+
+    if confusion_active and eval_dataloader is not None:
+        overall_snapshot_epochs = {0, train_config.num_epochs // 2, train_config.num_epochs - 1}
+
+    if confusion_active and pitch_confusion_ctx is not None:
+        western_eval_dataloader = pitch_confusion_ctx.get('western_eval_dataloader')
+        if western_eval_dataloader is not None:
+            pre_req = {
+                'enabled': True,
+                'artifact_prefix': 'western_pre_cpt',
+                'save_dir': confusion_save_dir,
+                'expected_pitch_dict_size': len(tokenizer.pitch_dict),
+                'max_eval_step': getattr(train_config, 'pitch_confusion_max_eval_step', 0),
+            }
+            pre_out = evaluation(
+                model, train_config, western_eval_dataloader, local_rank,
+                tokenizer, wandb_run, confusion_request=pre_req
+            )
+            _, _, _, _, pre_summary = pre_out
+            western_pre_matrix = pre_summary.get('matrix_western')
+            if western_pre_matrix is not None:
+                pitch_confusion_ctx['western_pre_matrix'] = western_pre_matrix
+                _maybe_log_pitch_confusion_to_wandb(
+                    train_config,
+                    wandb_run,
+                    pre_summary.get('artifacts', {}),
+                    {
+                        'western_pre_total_pitch_samples': pre_summary.get('total_pitch_samples', 0),
+                        'western_pre_ignored_pred_non_pitch': pre_summary.get('ignored_pred_non_pitch', 0),
+                    },
+                    step=0,
+                )
+
     # Start the training loop
     for epoch in range(starting_epoch, train_config.num_epochs):
         # stop when the maximum number of training steps is reached
@@ -946,11 +1034,73 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
         else:
             print(f"Epoch {epoch}: train_perplexity={train_perplexity:.4f}, train_epoch_loss={train_epoch_loss:.4f}, epoch time {epoch_end_time}s")
 
+        if confusion_active and eval_dataloader is not None and epoch in overall_snapshot_epochs:
+            req = {
+                'enabled': True,
+                'artifact_prefix': f'overall_epoch_{epoch}',
+                'save_dir': confusion_save_dir,
+                'expected_pitch_dict_size': len(tokenizer.pitch_dict),
+                'max_eval_step': getattr(train_config, 'pitch_confusion_max_eval_step', 0),
+            }
+            eval_out = evaluation(
+                model, train_config, eval_dataloader, local_rank,
+                tokenizer, wandb_run, confusion_request=req
+            )
+            _, _, _, _, conf_summary = eval_out
+            conf_metrics = {
+                f'overall_epoch_{epoch}_total_pitch_samples': conf_summary.get('total_pitch_samples', 0),
+                f'overall_epoch_{epoch}_ignored_pred_non_pitch': conf_summary.get('ignored_pred_non_pitch', 0),
+            }
+            _maybe_log_pitch_confusion_to_wandb(
+                train_config,
+                wandb_run,
+                conf_summary.get('artifacts', {}),
+                conf_metrics,
+                step=(epoch + 1) * len(train_dataloader),
+            )
+
         # Saving the results every epoch to plot later
         if train_config.save_metrics:
             save_to_json(metrics_filename, train_step_loss, train_loss, train_step_perplexity, train_prep, val_step_loss, val_loss, val_step_perplexity, val_prep)
 
     avg_epoch_time = sum(epoch_times)/ len(epoch_times)
+
+    if confusion_active and pitch_confusion_ctx is not None:
+        western_eval_dataloader = pitch_confusion_ctx.get('western_eval_dataloader')
+        western_pre_matrix = pitch_confusion_ctx.get('western_pre_matrix', western_pre_matrix)
+        if western_eval_dataloader is not None:
+            req = {
+                'enabled': True,
+                'artifact_prefix': 'western_post_cpt',
+                'save_dir': confusion_save_dir,
+                'expected_pitch_dict_size': len(tokenizer.pitch_dict),
+                'max_eval_step': getattr(train_config, 'pitch_confusion_max_eval_step', 0),
+            }
+            eval_out = evaluation(
+                model, train_config, western_eval_dataloader, local_rank,
+                tokenizer, wandb_run, confusion_request=req
+            )
+            _, _, _, _, post_summary = eval_out
+            drift_metrics = {
+                'western_post_total_pitch_samples': post_summary.get('total_pitch_samples', 0),
+                'western_post_ignored_pred_non_pitch': post_summary.get('ignored_pred_non_pitch', 0),
+            }
+            if western_pre_matrix is not None and post_summary.get('matrix_western') is not None:
+                drift_metrics.update(
+                    compute_western_drift_metrics(
+                        western_pre_matrix,
+                        post_summary['matrix_western'],
+                    )
+                )
+            results.update(drift_metrics)
+            _maybe_log_pitch_confusion_to_wandb(
+                train_config,
+                wandb_run,
+                post_summary.get('artifacts', {}),
+                drift_metrics,
+                step=train_config.num_epochs * len(train_dataloader),
+            )
+
     avg_checkpoint_time = sum(checkpoint_times)/ len(checkpoint_times) if len(checkpoint_times) > 0 else 0
     avg_train_prep = sum(train_prep)/len(train_prep)
     avg_train_loss = sum(train_loss)/len(train_loss)
@@ -976,7 +1126,7 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
     return results
 
 
-def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb_run):
+def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb_run, confusion_request=None):
     """
     Evaluates the model on the given dataloader
 
@@ -996,6 +1146,13 @@ def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb
     val_step_perplexity = []
     eval_loss = 0.0  # Initialize evaluation loss
     total_eval_steps = 0
+    confusion_state = None
+    confusion_enabled = bool(confusion_request and confusion_request.get('enabled', False))
+    confusion_max_eval_step = 0
+    if confusion_enabled:
+        confusion_state = init_pitch_confusion_state(tokenizer)
+        confusion_max_eval_step = int(confusion_request.get('max_eval_step', 0) or 0)
+
     with MemoryTrace() as memtrace:
         for step, batch in enumerate(tqdm(eval_dataloader,colour="green", desc="evaluating Epoch", dynamic_ncols=True)):
             total_eval_steps += 1
@@ -1003,6 +1160,8 @@ def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb
             if train_config.max_eval_step > 0 and total_eval_steps > train_config.max_eval_step:
                 if not train_config.enable_fsdp or local_rank==0:
                     print("max eval steps reached, stopping evaluation, total_eval_steps: ", total_eval_steps - 1)
+                break
+            if confusion_enabled and confusion_max_eval_step > 0 and total_eval_steps > confusion_max_eval_step:
                 break
             for key in batch.keys():
                 if train_config.enable_fsdp:
@@ -1020,6 +1179,9 @@ def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb
                 if train_config.save_metrics:
                     val_step_loss.append(loss.detach().float().item())
                     val_step_perplexity.append(float(torch.exp(loss.detach().float())))
+
+                if confusion_enabled and getattr(outputs, 'generation_logits', None) is not None:
+                    update_pitch_confusions(confusion_state, batch['labels'], outputs.generation_logits)
 
                 eval_loss += loss.detach().float()
 
@@ -1047,6 +1209,27 @@ def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb
                         'eval/perplexity': eval_ppl,
                         'eval/loss': eval_epoch_loss,
                     }, commit=False)
+
+    if confusion_enabled:
+        expected_pitch_dict_size = confusion_request.get('expected_pitch_dict_size', None)
+        save_dir = confusion_request.get('save_dir', os.path.join(train_config.output_dir, 'pitch_confusion'))
+        artifact_prefix = confusion_request.get('artifact_prefix', 'eval')
+        artifacts = save_pitch_confusion_artifacts(
+            confusion_state,
+            save_dir=save_dir,
+            artifact_prefix=artifact_prefix,
+            expected_pitch_dict_size=expected_pitch_dict_size,
+        )
+        summary = {
+            'artifacts': artifacts,
+            'total_pitch_samples': int(confusion_state.total_pitch_samples),
+            'ignored_pred_non_pitch': int(confusion_state.ignored_pred_non_pitch),
+            'matrix_western': confusion_state.matrix_western,
+            'matrix_overall': confusion_state.matrix_overall,
+            'pitch_token_ids': confusion_state.pitch_token_ids,
+            'western_token_ids': confusion_state.western_token_ids,
+        }
+        return eval_ppl, eval_epoch_loss, val_step_loss, val_step_perplexity, summary
 
     return eval_ppl, eval_epoch_loss, val_step_loss, val_step_perplexity
 

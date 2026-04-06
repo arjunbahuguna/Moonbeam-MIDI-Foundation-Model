@@ -350,6 +350,7 @@ def main(**kwargs):
 
     # Load western replay data for CPT data mixing (5-30% replay prevents catastrophic forgetting)
     western_train = None
+    western_eval = None # confusion matrix for western pitch confusion
     mixing_weights = None
     if train_config.western_data_dir:
         if train_config.batching_strategy != "packing":
@@ -366,8 +367,10 @@ def main(**kwargs):
         # Only LakhDataset is currently supported for western replay mixing
         # Can add more as needed
         western_train = LakhDataset(western_config, tokenizer, partition="train")
+        western_eval = LakhDataset(western_config, tokenizer, partition="test")
         if not train_config.enable_fsdp or rank == 0:
             print(f"--> Western Replay Set Length = {len(western_train)}")
+            print(f"--> Western Validation Set Length = {len(western_eval)}")
 
     dataset_val = get_preprocessed_dataset(
         tokenizer,
@@ -435,6 +438,7 @@ def main(**kwargs):
     )
 
     eval_dataloader = None
+    western_eval_dataloader = None
     if train_config.run_validation:
         if train_config.batching_strategy == "packing":
             dataset_val = ConcatDataset_hybrid_padding_concatenating(dataset_val, chunk_size=train_config.context_length, split="val", data_dir = dataset_config.data_dir ) 
@@ -447,6 +451,26 @@ def main(**kwargs):
             pin_memory=True,
             **val_dl_kwargs,
         )
+
+    if train_config.run_validation and western_eval is not None:
+        if train_config.batching_strategy == "packing":
+            western_eval = ConcatDataset_hybrid_padding_concatenating(
+                western_eval,
+                chunk_size=train_config.context_length,
+                split="val",
+                data_dir=train_config.western_data_dir,
+            )
+        west_val_dl_kwargs = get_dataloader_kwargs(train_config, western_eval, tokenizer, "val")
+        western_eval_dataloader = torch.utils.data.DataLoader(
+            western_eval,
+            num_workers=train_config.num_workers_dataloader,
+            pin_memory=True,
+            **west_val_dl_kwargs,
+        )
+
+    pitch_confusion_ctx = {
+        'western_eval_dataloader': western_eval_dataloader,
+    }
 
     # Compute warmup freeze duration: for the first 10% of training steps, zero out
     # gradients on the 12 western pitch rows in decoder_embedding and lm_head.
@@ -549,6 +573,7 @@ def main(**kwargs):
         rank if (train_config.enable_fsdp or train_config.enable_ddp) else None,
         wandb_run,
         microtonal_reg=microtonal_reg,
+        pitch_confusion_ctx=pitch_confusion_ctx,
     )
     if not train_config.enable_fsdp or rank==0:
         [print(f'Key: {k}, Value: {v}') for k, v in results.items()]

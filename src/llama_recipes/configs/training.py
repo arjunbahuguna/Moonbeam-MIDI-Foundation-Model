@@ -64,6 +64,10 @@ class train_config:
     pure_bf16: bool = False  # Convert model to bf16 (single-GPU; FSDP/DDP use their own configs)
     use_wandb: bool = False # Enable wandb for experient tracking
     log_interval: int = 10  # Log to wandb every N training steps (reduces noise)
+    enable_pitch_confusion: bool = False  # Compute/save pitch confusion artifacts during eval
+    pitch_confusion_dir: str = ""  # Defaults to output_dir/pitch_confusion when empty
+    pitch_confusion_max_eval_step: int = 0  # 0 = use all eval batches
+    pitch_confusion_log_wandb: bool = True  # Log confusion images/metrics to wandb when enabled
     save_metrics: bool = False # saves training metrics to a json file for later plotting
     flop_counter: bool = False # Enable flop counter to measure model throughput, can not be used with pytorch profiler at the same time.
     flop_counter_start: int = 3 # The step to start profiling, default is 3, which means after 3 steps of warmup stage, the profiler will start to count flops.
