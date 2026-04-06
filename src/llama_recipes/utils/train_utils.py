@@ -6,7 +6,7 @@ import time
 import yaml
 from contextlib import nullcontext
 from pathlib import Path
-from pkg_resources import packaging
+import packaging
 from datetime import datetime
 import contextlib
 
@@ -24,7 +24,12 @@ import json
 from llama_recipes.model_checkpointing import save_model_checkpoint, save_model_and_optimizer_sharded, save_optimizer_checkpoint, save_model_checkpoint_ddp, save_peft_checkpoint
 from llama_recipes.policies import fpSixteen,bfSixteen, get_llama_wrapper
 from llama_recipes.utils.memory_utils import MemoryTrace
-from accelerate.utils import is_xpu_available, is_ccl_available
+from accelerate.utils import is_xpu_available
+try:
+    # `is_ccl_available` was renamed to `is_xccl_available` in newer accelerate versions.
+    from accelerate.utils import is_ccl_available
+except ImportError:
+    from accelerate.utils import is_xccl_available as is_ccl_available
 from llama_recipes.utils.flop_utils import FlopMeasure
 def set_tokenizer_params(tokenizer: LlamaTokenizer):
     tokenizer.pad_token_id = 0

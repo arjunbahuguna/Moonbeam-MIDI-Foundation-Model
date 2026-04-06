@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 from dataclasses import asdict
 
 import fire
@@ -8,7 +9,7 @@ import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import f1_score
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 
 from llama_recipes.configs import train_config as TRAIN_CONFIG
 from llama_recipes.configs import fsdp_config as FSDP_CONFIG
@@ -19,6 +20,7 @@ from llama_recipes.configs import (
 from llama_recipes.datasets.music_tokenizer import MusicTokenizer
 from llama_recipes.transformers_minimal.src.transformers.models.llama.modeling_llama import (
     LlamaConfig,
+    LlamaForCausalLM,
     LlamaForSequenceClassification,
 )
 from llama_recipes.utils.config_utils import update_config, generate_dataset_config
@@ -62,6 +64,106 @@ def _load_music_tokenizer_from_config(model_config):
         pitchbend_sensitivity=getattr(model_config, "pitchbend_sensitivity", 2.0),
         microtonal_resolution=getattr(model_config, "microtonal_resolution", 1),
     )
+
+
+def _latest_adapter_checkpoint_dir(root_dir):
+    """Return latest {epoch}-{step}.safetensors checkpoint directory under root_dir."""
+    pattern = re.compile(r"^(\d+)-(\d+)\.safetensors$")
+    candidates = []
+    for name in os.listdir(root_dir):
+        full = os.path.join(root_dir, name)
+        if not os.path.isdir(full):
+            continue
+        match = pattern.match(name)
+        if match is None:
+            continue
+        epoch = int(match.group(1))
+        step = int(match.group(2))
+        if os.path.exists(os.path.join(full, "adapter_model.safetensors")):
+            candidates.append((epoch, step, full))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    return candidates[-1][2]
+
+
+def _find_microtonal_llama_config(ckpt_path):
+    """Find checkpoint-side llama_config.json saved during microtonal training."""
+    if not ckpt_path:
+        return None
+
+    # Support passing either root dir (checkpoints/microtonal_cpt) or
+    # specific adapter dir (checkpoints/microtonal_cpt/19-400.safetensors).
+    search_roots = []
+    if os.path.isdir(ckpt_path):
+        search_roots.append(ckpt_path)
+        search_roots.append(os.path.dirname(ckpt_path))
+
+    for root in search_roots:
+        if not root:
+            continue
+        candidate = os.path.join(root, "ddp-microtonal_cpt", "llama_config.json")
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def _load_checkpoint_into_model(model, ckpt_path, strict):
+    """Load either PEFT adapter dir or torch/safetensors state dict into model."""
+    if os.path.isdir(ckpt_path):
+        adapter_path = ckpt_path
+        adapter_file = os.path.join(adapter_path, "adapter_model.safetensors")
+        if not os.path.exists(adapter_file):
+            latest = _latest_adapter_checkpoint_dir(ckpt_path)
+            if latest is None:
+                raise ValueError(
+                    f"No adapter checkpoint found in directory: {ckpt_path}. "
+                    "Expected adapter_model.safetensors or subdirs like 19-400.safetensors/."
+                )
+            adapter_path = latest
+
+        # Adapter is CAUSAL_LM; merge it into a causal model first, then transfer
+        # matching backbone tensors into the classification model.
+        # Rebuild config through LlamaConfig to avoid cross-module PretrainedConfig
+        # identity mismatches in mixed transformers/peft environments.
+        causal_cfg = LlamaConfig.from_dict(model.config.to_dict())
+        causal_model = LlamaForCausalLM(causal_cfg)
+        peft_model = PeftModel.from_pretrained(
+            causal_model,
+            adapter_path,
+            is_trainable=False,
+        )
+        merged_causal = peft_model.merge_and_unload()
+
+        merged_state = merged_causal.state_dict()
+        filtered_state, skipped = _filter_state_dict_by_shape(model, merged_state)
+        missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+        print(
+            f"Loaded and merged PEFT adapter from {adapter_path}. "
+            f"transferred_keys={len(filtered_state)}, missing_keys={len(missing)}, "
+            f"unexpected_keys={len(unexpected)}, skipped_shape_mismatch={len(skipped)}"
+        )
+        return model
+
+    if ckpt_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        state_dict = load_file(ckpt_path)
+    else:
+        raw = torch.load(ckpt_path, map_location="cpu")
+        state_dict = raw.get("model_state_dict", raw)
+
+    state_dict = _strip_module_prefix(state_dict)
+    state_dict, skipped = _filter_state_dict_by_shape(model, state_dict)
+    missing, unexpected = model.load_state_dict(state_dict, strict=bool(strict))
+    print(
+        f"Loaded checkpoint from {ckpt_path}. "
+        f"missing_keys={len(missing)}, unexpected_keys={len(unexpected)}, skipped_shape_mismatch={len(skipped)}"
+    )
+    return model
 
 
 class CompoundClassificationCollator:
@@ -351,6 +453,14 @@ def main(**kwargs):
         torch.xpu.manual_seed(train_cfg.seed)
 
     model_config_path = makam_cfg.model_config_path
+    ckpt_path = train_cfg.trained_checkpoint_path
+    ckpt_model_config_path = _find_microtonal_llama_config(ckpt_path)
+    if ckpt_model_config_path is not None:
+        model_config_path = ckpt_model_config_path
+        print(
+            f"Using checkpoint-side model config for compatibility: {model_config_path}"
+        )
+
     model_config = LlamaConfig.from_pretrained(model_config_path)
     tokenizer = _load_music_tokenizer_from_config(model_config)
 
@@ -371,19 +481,11 @@ def main(**kwargs):
     model = LlamaForSequenceClassification(model_config)
 
     # Optional initialization from a pretrained checkpoint path.
-    ckpt_path = train_cfg.trained_checkpoint_path
     if ckpt_path and os.path.exists(ckpt_path):
-        raw = torch.load(ckpt_path, map_location="cpu")
-        state_dict = raw.get("model_state_dict", raw)
-        state_dict = _strip_module_prefix(state_dict)
-        state_dict, skipped = _filter_state_dict_by_shape(model, state_dict)
-        missing, unexpected = model.load_state_dict(
-            state_dict,
+        model = _load_checkpoint_into_model(
+            model,
+            ckpt_path,
             strict=bool(makam_cfg.checkpoint_strict),
-        )
-        print(
-            f"Loaded checkpoint from {ckpt_path}. "
-            f"missing_keys={len(missing)}, unexpected_keys={len(unexpected)}, skipped_shape_mismatch={len(skipped)}"
         )
 
     model.to(device)

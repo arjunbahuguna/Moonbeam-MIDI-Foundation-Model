@@ -14,12 +14,15 @@ from torch.distributed.fsdp import (
     # ShardedStateDictConfig, # un-flattened param but shards, usable by other parallel schemes.
 )
 
-from torch.distributed._shard.checkpoint import (
-    FileSystemReader,
-    FileSystemWriter,
-    save_state_dict,
-    load_state_dict,
-)
+try:
+    import torch.distributed.checkpoint as dist_cp
+except ImportError:
+    import torch.distributed._shard.checkpoint as dist_cp
+
+FileSystemReader = dist_cp.FileSystemReader
+FileSystemWriter = dist_cp.FileSystemWriter
+save_state_dict = dist_cp.save_state_dict
+load_state_dict = dist_cp.load_state_dict
 from torch.distributed.checkpoint.default_planner import (
     DefaultSavePlanner,
     DefaultLoadPlanner,
@@ -27,7 +30,6 @@ from torch.distributed.checkpoint.default_planner import (
 
 
 from torch.distributed.fsdp.fully_sharded_data_parallel import StateDictType
-import torch.distributed._shard.checkpoint as dist_cp
 import torch.distributed as dist
 
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
