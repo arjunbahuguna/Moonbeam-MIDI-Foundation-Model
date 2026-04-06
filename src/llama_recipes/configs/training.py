@@ -68,6 +68,7 @@ class train_config:
     pitch_confusion_dir: str = ""  # Defaults to output_dir/pitch_confusion when empty
     pitch_confusion_max_eval_step: int = 0  # 0 = use all eval batches
     pitch_confusion_log_wandb: bool = True  # Log confusion images/metrics to wandb when enabled
+    validation_only: bool = False  # Run evaluation pipeline only (no training loop)
     save_metrics: bool = False # saves training metrics to a json file for later plotting
     flop_counter: bool = False # Enable flop counter to measure model throughput, can not be used with pytorch profiler at the same time.
     flop_counter_start: int = 3 # The step to start profiling, default is 3, which means after 3 steps of warmup stage, the profiler will start to count flops.

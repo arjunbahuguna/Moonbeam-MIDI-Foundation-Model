@@ -1,5 +1,6 @@
 import json
 import os
+import csv
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -12,10 +13,13 @@ import torch
 class PitchConfusionState:
     matrix_overall: np.ndarray
     matrix_western: np.ndarray
+    matrix_western14: np.ndarray
     pitch_token_ids: List[int]
     western_token_ids: List[int]
+    western14_token_ids: List[int]
     id_to_overall_idx: Dict[int, int]
     id_to_western_idx: Dict[int, int]
+    id_to_western14_idx: Dict[int, int]
     total_pitch_samples: int = 0
     ignored_pred_non_pitch: int = 0
 
@@ -56,6 +60,15 @@ def _western_token_ids_from_pitch_dict(pitch_dict: Dict[int, int]) -> List[int]:
     return sorted(set(western))
 
 
+def _western14_token_ids_from_pitch_dict(pitch_dict: Dict[int, int]) -> List[int]:
+    # Keep semitones in musical order plus pitch SOS/EOS at the end.
+    required_cents = list(range(0, 1200, 100)) + [1200, 1201]
+    missing = [c for c in required_cents if c not in pitch_dict]
+    if missing:
+        raise ValueError(f"Missing expected cents in pitch_dict for western14: {missing}")
+    return [int(pitch_dict[c]) for c in required_cents]
+
+
 def init_pitch_confusion_state(tokenizer) -> PitchConfusionState:
     pitch_token_ids = sorted({int(v) for v in tokenizer.pitch_dict.values()})
     if len(pitch_token_ids) != len(tokenizer.pitch_dict):
@@ -70,19 +83,30 @@ def init_pitch_confusion_state(tokenizer) -> PitchConfusionState:
             f"Expected 12 western pitch token IDs, found {len(western_token_ids)}."
         )
 
+    western14_token_ids = _western14_token_ids_from_pitch_dict(tokenizer.pitch_dict)
+    if len(western14_token_ids) != 14:
+        raise ValueError(
+            f"Expected 14 western+SOS/EOS pitch token IDs, found {len(western14_token_ids)}."
+        )
+
     id_to_overall_idx = {tid: i for i, tid in enumerate(pitch_token_ids)}
     id_to_western_idx = {tid: i for i, tid in enumerate(western_token_ids)}
+    id_to_western14_idx = {tid: i for i, tid in enumerate(western14_token_ids)}
 
     matrix_overall = np.zeros((len(pitch_token_ids), len(pitch_token_ids)), dtype=np.int64)
     matrix_western = np.zeros((12, 12), dtype=np.int64)
+    matrix_western14 = np.zeros((14, 14), dtype=np.int64)
 
     return PitchConfusionState(
         matrix_overall=matrix_overall,
         matrix_western=matrix_western,
+        matrix_western14=matrix_western14,
         pitch_token_ids=pitch_token_ids,
         western_token_ids=western_token_ids,
+        western14_token_ids=western14_token_ids,
         id_to_overall_idx=id_to_overall_idx,
         id_to_western_idx=id_to_western_idx,
+        id_to_western14_idx=id_to_western14_idx,
     )
 
 
@@ -108,6 +132,11 @@ def update_pitch_confusions(state: PitchConfusionState, labels: torch.Tensor, ge
         if wi is not None and wj is not None:
             state.matrix_western[wi, wj] += 1
 
+        w14i = state.id_to_western14_idx.get(int(t))
+        w14j = state.id_to_western14_idx.get(int(p))
+        if w14i is not None and w14j is not None:
+            state.matrix_western14[w14i, w14j] += 1
+
 
 def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     row_sums = matrix.sum(axis=1, keepdims=True)
@@ -123,27 +152,32 @@ def _plot_heatmap(
     output_path: str,
     title: str,
     normalize_rows: bool = False,
+    max_visible_tick_labels: int = 60,
 ) -> None:
     data = _normalize_rows(matrix) if normalize_rows else matrix.astype(np.float64)
 
-    fig, ax = plt.subplots(figsize=(10, 8), dpi=160)
+    n = len(token_ids)
+    # Scale canvas with matrix size so dense plots remain legible.
+    side = min(26, max(10, n / 55.0))
+    fig, ax = plt.subplots(figsize=(side, side * 0.8), dpi=160)
     im = ax.imshow(data, interpolation="nearest", aspect="auto", cmap="viridis")
     cbar = fig.colorbar(im, ax=ax)
     cbar.ax.set_ylabel("row-normalized" if normalize_rows else "count", rotation=-90, va="bottom")
 
-    n = len(token_ids)
-    if n <= 40:
+    # Keep the full matrix, but sparsify axis labels for readability.
+    if n <= max_visible_tick_labels:
         tick_positions = np.arange(n)
-        tick_labels = [str(t) for t in token_ids]
     else:
-        stride = max(1, n // 20)
+        stride = int(np.ceil(n / float(max_visible_tick_labels)))
         tick_positions = np.arange(0, n, stride)
-        tick_labels = [str(token_ids[i]) for i in tick_positions]
+        if tick_positions[-1] != n - 1:
+            tick_positions = np.append(tick_positions, n - 1)
+    tick_labels = [str(token_ids[i]) for i in tick_positions]
 
     ax.set_xticks(tick_positions)
     ax.set_yticks(tick_positions)
-    ax.set_xticklabels(tick_labels, rotation=90, fontsize=7)
-    ax.set_yticklabels(tick_labels, fontsize=7)
+    ax.set_xticklabels(tick_labels, rotation=90, fontsize=6)
+    ax.set_yticklabels(tick_labels, fontsize=6)
     ax.set_xlabel("Predicted pitch language token ID")
     ax.set_ylabel("True pitch language token ID")
     ax.set_title(title)
@@ -168,14 +202,25 @@ def save_pitch_confusion_artifacts(
 
     overall_npy = os.path.join(save_dir, f"{artifact_prefix}_overall_counts.npy")
     western_npy = os.path.join(save_dir, f"{artifact_prefix}_western12_counts.npy")
+    western14_npy = os.path.join(save_dir, f"{artifact_prefix}_western14_counts.npy")
     overall_row_png = os.path.join(save_dir, f"{artifact_prefix}_overall_row_norm.png")
     overall_cnt_png = os.path.join(save_dir, f"{artifact_prefix}_overall_counts.png")
     western_row_png = os.path.join(save_dir, f"{artifact_prefix}_western12_row_norm.png")
     western_cnt_png = os.path.join(save_dir, f"{artifact_prefix}_western12_counts.png")
+    western14_row_png = os.path.join(save_dir, f"{artifact_prefix}_western14_row_norm.png")
+    western14_cnt_png = os.path.join(save_dir, f"{artifact_prefix}_western14_counts.png")
+    token_map_csv = os.path.join(save_dir, f"{artifact_prefix}_overall_token_index_map.csv")
     meta_json = os.path.join(save_dir, f"{artifact_prefix}_meta.json")
 
     np.save(overall_npy, state.matrix_overall)
     np.save(western_npy, state.matrix_western)
+    np.save(western14_npy, state.matrix_western14)
+
+    with open(token_map_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["matrix_index", "pitch_token_id"])
+        for idx, token_id in enumerate(state.pitch_token_ids):
+            writer.writerow([idx, token_id])
 
     _plot_heatmap(
         state.matrix_overall,
@@ -205,6 +250,20 @@ def save_pitch_confusion_artifacts(
         title=f"Pitch Confusion (western 12x12 row-normalized, token IDs) [{artifact_prefix}]",
         normalize_rows=True,
     )
+    _plot_heatmap(
+        state.matrix_western14,
+        state.western14_token_ids,
+        western14_cnt_png,
+        title=f"Pitch Confusion (western+SOS/EOS 14x14, token IDs) [{artifact_prefix}]",
+        normalize_rows=False,
+    )
+    _plot_heatmap(
+        state.matrix_western14,
+        state.western14_token_ids,
+        western14_row_png,
+        title=f"Pitch Confusion (western+SOS/EOS 14x14 row-normalized, token IDs) [{artifact_prefix}]",
+        normalize_rows=True,
+    )
 
     with open(meta_json, "w", encoding="utf-8") as f:
         json.dump(
@@ -212,6 +271,7 @@ def save_pitch_confusion_artifacts(
                 "artifact_prefix": artifact_prefix,
                 "pitch_token_ids": state.pitch_token_ids,
                 "western_token_ids": state.western_token_ids,
+                "western14_token_ids": state.western14_token_ids,
                 "pitch_dict_size": len(state.pitch_token_ids),
                 "total_pitch_samples": int(state.total_pitch_samples),
                 "ignored_pred_non_pitch": int(state.ignored_pred_non_pitch),
@@ -223,10 +283,14 @@ def save_pitch_confusion_artifacts(
     return {
         "overall_npy": overall_npy,
         "western_npy": western_npy,
+        "western14_npy": western14_npy,
+        "overall_token_index_map_csv": token_map_csv,
         "overall_counts_png": overall_cnt_png,
         "overall_row_norm_png": overall_row_png,
         "western_counts_png": western_cnt_png,
         "western_row_norm_png": western_row_png,
+        "western14_counts_png": western14_cnt_png,
+        "western14_row_norm_png": western14_row_png,
         "meta_json": meta_json,
     }
 

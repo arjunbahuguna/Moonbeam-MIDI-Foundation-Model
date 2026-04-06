@@ -42,6 +42,7 @@ from llama_recipes.utils.dataset_utils import get_preprocessed_dataset
 from llama_recipes.utils.fsdp_utils import hsdp_device_mesh
 from llama_recipes.utils.train_utils import (
     train_con_gen,
+    evaluation,
     freeze_transformer_layers,
     setup,
     setup_environ_flags,
@@ -471,6 +472,56 @@ def main(**kwargs):
     pitch_confusion_ctx = {
         'western_eval_dataloader': western_eval_dataloader,
     }
+
+    # Validation-only mode: run eval/confusion artifacts without entering training.
+    if getattr(train_config, 'validation_only', False):
+        if not train_config.run_validation:
+            raise ValueError("validation_only=True requires run_validation=True")
+        if eval_dataloader is None:
+            raise ValueError("Validation dataloader is not available. Check dataset and run_validation config.")
+
+        confusion_request = None
+        if getattr(train_config, 'enable_pitch_confusion', False):
+            confusion_save_dir = (
+                train_config.pitch_confusion_dir
+                if getattr(train_config, 'pitch_confusion_dir', '')
+                else os.path.join(train_config.output_dir, 'pitch_confusion')
+            )
+            confusion_request = {
+                'enabled': True,
+                'artifact_prefix': 'validation_only_overall',
+                'save_dir': confusion_save_dir,
+                'expected_pitch_dict_size': len(tokenizer.pitch_dict),
+                'max_eval_step': getattr(train_config, 'pitch_confusion_max_eval_step', 0),
+            }
+
+        eval_out = evaluation(
+            model,
+            train_config,
+            eval_dataloader,
+            local_rank if (train_config.enable_fsdp or train_config.enable_ddp) else 0,
+            tokenizer,
+            wandb_run,
+            confusion_request=confusion_request,
+        )
+
+        if confusion_request is not None:
+            eval_ppl, eval_epoch_loss, _, _, conf_summary = eval_out
+            if not train_config.enable_fsdp or rank == 0:
+                print(
+                    f"Validation-only confusion summary: total_pitch_samples={conf_summary.get('total_pitch_samples', 0)}, "
+                    f"ignored_pred_non_pitch={conf_summary.get('ignored_pred_non_pitch', 0)}"
+                )
+                print(f"Artifacts: {conf_summary.get('artifacts', {})}")
+        else:
+            eval_ppl, eval_epoch_loss, _, _ = eval_out
+
+        if not train_config.enable_fsdp or rank == 0:
+            print(f"Validation-only completed: eval_ppl={eval_ppl}, eval_epoch_loss={eval_epoch_loss}")
+            if train_config.use_wandb and wandb_run is not None:
+                wandb_run.summary['validation_only_eval_ppl'] = float(eval_ppl)
+                wandb_run.summary['validation_only_eval_loss'] = float(eval_epoch_loss)
+        return
 
     # Compute warmup freeze duration: for the first 10% of training steps, zero out
     # gradients on the 12 western pitch rows in decoder_embedding and lm_head.
