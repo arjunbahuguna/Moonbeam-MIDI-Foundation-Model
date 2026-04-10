@@ -94,6 +94,9 @@ def main(
     window_stride: int = 600,
     aggregation: str = "mean",
 ):
+
+    import os
+
     if aggregation not in {"mean", "max"}:
         raise ValueError("aggregation must be one of: mean, max")
 
@@ -129,38 +132,77 @@ def main(
     model.to(device)
     model.eval()
 
-    raw_tokens = np.load(npy_path)
-    encoded = tokenizer.encode_series(raw_tokens, if_add_sos=True, if_add_eos=True)
-    windows = _window_compound_tokens(encoded, max_len=seq_len, stride=window_stride)
+    # Check if npy_path is a directory or file
+    if os.path.isdir(npy_path):
+        npy_files = [os.path.join(npy_path, f) for f in os.listdir(npy_path) if f.endswith('.npy')]
+        results = []
+        for npy_file in npy_files:
+            raw_tokens = np.load(npy_file)
+            encoded = tokenizer.encode_series(raw_tokens, if_add_sos=True, if_add_eos=True)
+            windows = _window_compound_tokens(encoded, max_len=seq_len, stride=window_stride)
 
-    logits_per_window = []
-    with torch.no_grad():
-        for w in windows:
-            input_ids = torch.tensor(w, dtype=torch.long, device=device).unsqueeze(0)
-            attention_mask = torch.ones((1, input_ids.shape[1]), dtype=torch.long, device=device)
-            out = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits_per_window.append(out.logits.squeeze(0).detach().cpu())
+            logits_per_window = []
+            with torch.no_grad():
+                for w in windows:
+                    input_ids = torch.tensor(w, dtype=torch.long, device=device).unsqueeze(0)
+                    attention_mask = torch.ones((1, input_ids.shape[1]), dtype=torch.long, device=device)
+                    out = model(input_ids=input_ids, attention_mask=attention_mask)
+                    logits_per_window.append(out.logits.squeeze(0).detach().cpu())
 
-    stacked_logits = torch.stack(logits_per_window, dim=0)
-    agg_logits = _aggregate_logits(stacked_logits, method=aggregation)
-    probs = torch.softmax(agg_logits, dim=-1)
-    pred_id = int(torch.argmax(probs).item())
-    pred_label = id_to_label.get(pred_id, str(pred_id))
-    confidence = float(probs[pred_id].item())
+            stacked_logits = torch.stack(logits_per_window, dim=0)
+            agg_logits = _aggregate_logits(stacked_logits, method=aggregation)
+            probs = torch.softmax(agg_logits, dim=-1)
+            pred_id = int(torch.argmax(probs).item())
+            pred_label = id_to_label.get(pred_id, str(pred_id))
+            confidence = float(probs[pred_id].item())
 
-    result = {
-        "npy_path": npy_path,
-        "predicted_label_id": pred_id,
-        "predicted_label": pred_label,
-        "confidence": confidence,
-        "num_windows": len(windows),
-        "window_policy": {
-            "seq_len": int(seq_len),
-            "window_stride": int(window_stride),
-            "aggregation": aggregation,
-        },
-    }
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+            result = {
+                "npy_path": npy_file,
+                "predicted_label_id": pred_id,
+                "predicted_label": pred_label,
+                "confidence": confidence,
+                "num_windows": len(windows),
+                "window_policy": {
+                    "seq_len": int(seq_len),
+                    "window_stride": int(window_stride),
+                    "aggregation": aggregation,
+                },
+            }
+            results.append(result)
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+    else:
+        raw_tokens = np.load(npy_path)
+        encoded = tokenizer.encode_series(raw_tokens, if_add_sos=True, if_add_eos=True)
+        windows = _window_compound_tokens(encoded, max_len=seq_len, stride=window_stride)
+
+        logits_per_window = []
+        with torch.no_grad():
+            for w in windows:
+                input_ids = torch.tensor(w, dtype=torch.long, device=device).unsqueeze(0)
+                attention_mask = torch.ones((1, input_ids.shape[1]), dtype=torch.long, device=device)
+                out = model(input_ids=input_ids, attention_mask=attention_mask)
+                logits_per_window.append(out.logits.squeeze(0).detach().cpu())
+
+        stacked_logits = torch.stack(logits_per_window, dim=0)
+        agg_logits = _aggregate_logits(stacked_logits, method=aggregation)
+        probs = torch.softmax(agg_logits, dim=-1)
+        pred_id = int(torch.argmax(probs).item())
+        pred_label = id_to_label.get(pred_id, str(pred_id))
+        confidence = float(probs[pred_id].item())
+
+        result = {
+            "npy_path": npy_path,
+            "predicted_label_id": pred_id,
+            "predicted_label": pred_label,
+            "confidence": confidence,
+            "num_windows": len(windows),
+            "window_policy": {
+                "seq_len": int(seq_len),
+                "window_stride": int(window_stride),
+                "aggregation": aggregation,
+            },
+        }
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

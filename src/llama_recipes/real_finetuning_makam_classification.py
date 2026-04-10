@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 from dataclasses import asdict
 
 import fire
@@ -8,7 +9,7 @@ import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import f1_score
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 
 from llama_recipes.configs import train_config as TRAIN_CONFIG
 from llama_recipes.configs import fsdp_config as FSDP_CONFIG
@@ -19,6 +20,7 @@ from llama_recipes.configs import (
 from llama_recipes.datasets.music_tokenizer import MusicTokenizer
 from llama_recipes.transformers_minimal.src.transformers.models.llama.modeling_llama import (
     LlamaConfig,
+    LlamaForCausalLM,
     LlamaForSequenceClassification,
 )
 from llama_recipes.utils.config_utils import update_config, generate_dataset_config
@@ -64,6 +66,106 @@ def _load_music_tokenizer_from_config(model_config):
     )
 
 
+def _latest_adapter_checkpoint_dir(root_dir):
+    """Return latest {epoch}-{step}.safetensors checkpoint directory under root_dir."""
+    pattern = re.compile(r"^(\d+)-(\d+)\.safetensors$")
+    candidates = []
+    for name in os.listdir(root_dir):
+        full = os.path.join(root_dir, name)
+        if not os.path.isdir(full):
+            continue
+        match = pattern.match(name)
+        if match is None:
+            continue
+        epoch = int(match.group(1))
+        step = int(match.group(2))
+        if os.path.exists(os.path.join(full, "adapter_model.safetensors")):
+            candidates.append((epoch, step, full))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    return candidates[-1][2]
+
+
+def _find_microtonal_llama_config(ckpt_path):
+    """Find checkpoint-side llama_config.json saved during microtonal training."""
+    if not ckpt_path:
+        return None
+
+    # Support passing either root dir (checkpoints/microtonal_cpt) or
+    # specific adapter dir (checkpoints/microtonal_cpt/19-400.safetensors).
+    search_roots = []
+    if os.path.isdir(ckpt_path):
+        search_roots.append(ckpt_path)
+        search_roots.append(os.path.dirname(ckpt_path))
+
+    for root in search_roots:
+        if not root:
+            continue
+        candidate = os.path.join(root, "ddp-microtonal_cpt", "llama_config.json")
+        if os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def _load_checkpoint_into_model(model, ckpt_path, strict):
+    """Load either PEFT adapter dir or torch/safetensors state dict into model."""
+    if os.path.isdir(ckpt_path):
+        adapter_path = ckpt_path
+        adapter_file = os.path.join(adapter_path, "adapter_model.safetensors")
+        if not os.path.exists(adapter_file):
+            latest = _latest_adapter_checkpoint_dir(ckpt_path)
+            if latest is None:
+                raise ValueError(
+                    f"No adapter checkpoint found in directory: {ckpt_path}. "
+                    "Expected adapter_model.safetensors or subdirs like 19-400.safetensors/."
+                )
+            adapter_path = latest
+
+        # Adapter is CAUSAL_LM; merge it into a causal model first, then transfer
+        # matching backbone tensors into the classification model.
+        # Rebuild config through LlamaConfig to avoid cross-module PretrainedConfig
+        # identity mismatches in mixed transformers/peft environments.
+        causal_cfg = LlamaConfig.from_dict(model.config.to_dict())
+        causal_model = LlamaForCausalLM(causal_cfg)
+        peft_model = PeftModel.from_pretrained(
+            causal_model,
+            adapter_path,
+            is_trainable=False,
+        )
+        merged_causal = peft_model.merge_and_unload()
+
+        merged_state = merged_causal.state_dict()
+        filtered_state, skipped = _filter_state_dict_by_shape(model, merged_state)
+        missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+        print(
+            f"Loaded and merged PEFT adapter from {adapter_path}. "
+            f"transferred_keys={len(filtered_state)}, missing_keys={len(missing)}, "
+            f"unexpected_keys={len(unexpected)}, skipped_shape_mismatch={len(skipped)}"
+        )
+        return model
+
+    if ckpt_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        state_dict = load_file(ckpt_path)
+    else:
+        raw = torch.load(ckpt_path, map_location="cpu")
+        state_dict = raw.get("model_state_dict", raw)
+
+    state_dict = _strip_module_prefix(state_dict)
+    state_dict, skipped = _filter_state_dict_by_shape(model, state_dict)
+    missing, unexpected = model.load_state_dict(state_dict, strict=bool(strict))
+    print(
+        f"Loaded checkpoint from {ckpt_path}. "
+        f"missing_keys={len(missing)}, unexpected_keys={len(unexpected)}, skipped_shape_mismatch={len(skipped)}"
+    )
+    return model
+
+
 class CompoundClassificationCollator:
     """Pad variable-length compound-token sequences for classification."""
 
@@ -105,6 +207,38 @@ def _move_batch_to_device(batch, device):
     for key, value in batch.items():
         moved[key] = value.to(device)
     return moved
+
+
+def _create_optimizer(model, train_cfg, device):
+    """Choose an optimizer that fits available VRAM on small GPUs."""
+    adamw = optim.AdamW(
+        model.parameters(),
+        lr=train_cfg.lr,
+        weight_decay=train_cfg.weight_decay,
+    )
+
+    if device.type != "cuda":
+        return adamw, "adamw"
+
+    trainable_numel = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    adam_state_bytes = trainable_numel * 2 * 4  # exp_avg + exp_avg_sq in fp32
+    free_bytes, _ = torch.cuda.mem_get_info()
+
+    # Keep headroom for allocator fragmentation and transient kernels.
+    if adam_state_bytes > int(0.85 * free_bytes):
+        print(
+            "Low-VRAM mode: switching optimizer to SGD "
+            f"(AdamW state would need ~{adam_state_bytes / (1024**3):.2f} GiB, "
+            f"free ~{free_bytes / (1024**3):.2f} GiB)."
+        )
+        sgd = optim.SGD(
+            model.parameters(),
+            lr=train_cfg.lr,
+            weight_decay=train_cfg.weight_decay,
+        )
+        return sgd, "sgd"
+
+    return adamw, "adamw"
 
 
 def evaluate_classification(model, dataloader, device):
@@ -165,6 +299,7 @@ def train_classification(
         epoch_loss_sum = 0.0
         epoch_steps = 0
         optimizer.zero_grad()
+        reached_max_steps = False
 
         for step, batch in enumerate(train_dataloader):
             model.train()
@@ -222,6 +357,20 @@ def train_classification(
                             ckpt_path,
                         )
                         print(f"Saved best checkpoint to {ckpt_path}")
+
+            if int(train_cfg.max_train_step) > 0 and global_step >= int(
+                train_cfg.max_train_step
+            ):
+                reached_max_steps = True
+                break
+
+        if reached_max_steps:
+            scheduler.step()
+            epoch_train_loss = epoch_loss_sum / max(1, epoch_steps)
+            running_train_losses.append(epoch_train_loss)
+            print(f"epoch={epoch} train_loss={epoch_train_loss:.6f}")
+            print(f"Reached max_train_step={train_cfg.max_train_step}; stopping early.")
+            break
 
         scheduler.step()
         epoch_train_loss = epoch_loss_sum / max(1, epoch_steps)
@@ -304,6 +453,14 @@ def main(**kwargs):
         torch.xpu.manual_seed(train_cfg.seed)
 
     model_config_path = makam_cfg.model_config_path
+    ckpt_path = train_cfg.trained_checkpoint_path
+    ckpt_model_config_path = _find_microtonal_llama_config(ckpt_path)
+    if ckpt_model_config_path is not None:
+        model_config_path = ckpt_model_config_path
+        print(
+            f"Using checkpoint-side model config for compatibility: {model_config_path}"
+        )
+
     model_config = LlamaConfig.from_pretrained(model_config_path)
     tokenizer = _load_music_tokenizer_from_config(model_config)
 
@@ -324,19 +481,11 @@ def main(**kwargs):
     model = LlamaForSequenceClassification(model_config)
 
     # Optional initialization from a pretrained checkpoint path.
-    ckpt_path = train_cfg.trained_checkpoint_path
     if ckpt_path and os.path.exists(ckpt_path):
-        raw = torch.load(ckpt_path, map_location="cpu")
-        state_dict = raw.get("model_state_dict", raw)
-        state_dict = _strip_module_prefix(state_dict)
-        state_dict, skipped = _filter_state_dict_by_shape(model, state_dict)
-        missing, unexpected = model.load_state_dict(
-            state_dict,
+        model = _load_checkpoint_into_model(
+            model,
+            ckpt_path,
             strict=bool(makam_cfg.checkpoint_strict),
-        )
-        print(
-            f"Loaded checkpoint from {ckpt_path}. "
-            f"missing_keys={len(missing)}, unexpected_keys={len(unexpected)}, skipped_shape_mismatch={len(skipped)}"
         )
 
     model.to(device)
@@ -399,11 +548,8 @@ def main(**kwargs):
         )
         train_cfg.run_validation = False
 
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=train_cfg.lr,
-        weight_decay=train_cfg.weight_decay,
-    )
+    optimizer, optimizer_name = _create_optimizer(model, train_cfg, device)
+    print(f"Using optimizer: {optimizer_name}")
     scheduler = StepLR(optimizer, step_size=1, gamma=train_cfg.gamma)
 
     results = train_classification(

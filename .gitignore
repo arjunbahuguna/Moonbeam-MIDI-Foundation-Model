@@ -42,3 +42,14 @@ wandb/
 /src/llama_recipes/configs/__pycache__
 *.npy
 *.pt
+
+
+# User-specific files
+slurm/
+models/
+data_processed/
+checkpoints/
+data/
+.venv/
+.idea/
+output_folder/
