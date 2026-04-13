@@ -25,6 +25,7 @@ datasets/classification/emopia2.2/
 datasets/classification/pianist8/
 datasets/classification/pijama30/
 processed_datasets/
+data/
 
 # Models
 models/
