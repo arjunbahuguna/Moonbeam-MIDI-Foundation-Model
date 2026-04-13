@@ -13,6 +13,13 @@ This first cycle is intentionally minimal: 3 pieces per task, end-to-end sanity,
 - Sample size: 3 pieces for player recognition + 3 pieces for makam classification.
 - Goal: pipeline correctness and reproducibility, not final benchmark quality.
 
+## Delta Findings (Apr 2026)
+- Intended player-classification entrypoint is `src/llama_recipes/real_finetuning_player_classification.py` (no separate dedicated eval script in this branch).
+- Intended evaluation mode is validation inside the same entrypoint (`run_validation=True`) with piece-wise test behavior (`individual_eval=True` in dataset config).
+- Current branch divergence: `train_player_classification()` in `src/llama_recipes/utils/train_utils.py` is currently a compatibility wrapper to generic `train()` (specialized player metrics path from the original branch is not guaranteed here).
+- Classification token is currently defined on tokenizer setup, but not actually prepended in active dataset encoding path unless explicitly requested in tokenizer call.
+- Highest-priority runtime correctness blockers for sequence classification are now data-shape related (sequence-level labels and valid attention mask), not missing entry scripts.
+
 ## Infrastructure Assumptions
 - GPU: NVIDIA RTX 3090 (24 GB VRAM), single-GPU execution.
 - Python environment: project `.venv`.
@@ -65,6 +72,21 @@ Purpose: verify shipped task works locally.
 - Dataset load check.
 - One forward pass check.
 - Inference output check (class id + confidence/probability format).
+
+### 3.2.a Intended path lock (current branch)
+- Use only `python -m llama_recipes.real_finetuning_player_classification` as canonical player run path for this cycle.
+- Treat this as train+eval unified path (no separate eval-only script currently trusted).
+- Keep mini sanity command constrained (`max_train_step=1`, `max_eval_step=1`, `batch_size_training=1`, `val_batch_size=1`, `num_workers_dataloader=0`).
+
+### 3.2.b Pre-run correctness gates (must pass before rerun)
+- Dataset emits sequence-level labels for `LlamaForSequenceClassification` (one class id per sample, not per token).
+- Dataset emits a real attention mask (ones for valid tokens, zeros only for padding).
+- Tokenizer player-classification encode signature matches call site (already aligned in current file state).
+- Player config/ckpt architecture match is maintained (`hidden_size`, `intermediate_size`, `num_hidden_layers`).
+
+### 3.2.c Success signal for this phase
+- First train step and first validation step complete without shape/signature exceptions.
+- Validation metrics are logged from the active path (loss required; F1 optional for this cycle unless specialized baseline path is restored).
 
 ### 3.3 Record observations
 - Any loader/config mismatch.
@@ -129,14 +151,23 @@ Acceptance criteria:
 
 ## Verification Checklist (Current Cycle)
 - [ ] Player baseline source pinned to `origin/finetune_player_classification`.
+- [ ] Canonical local player run path fixed to `python -m llama_recipes.real_finetuning_player_classification`.
+- [ ] Confirmed there is no separate straightforward eval-only player script in current branch.
 - [ ] 3090 runtime profile recorded (batch/seq/seed/device mode).
+- [ ] Player dataset returns sequence-level labels (not token-length label vectors).
+- [ ] Player dataset attention mask is valid (non-zero on active tokens).
 - [ ] Player mini test passed for 3 pieces.
+- [ ] Add eval-only player-classification entrypoint (no training loop) and document command for future sanity checks.
+- [ ] After player sanity check, restore microtonal-compatible preprocessing in `data_preprocess.py`.
 - [ ] Makam mini test passed for 3 pieces.
 - [ ] CSV-to-token-file integrity confirmed for tested makam rows.
 - [ ] Equivalence gap summary completed.
 - [ ] Larger-machine handoff section completed.
 
 ## Notes and Risks
+- Temporary branch-local change: `data_preprocess.py` is currently using the player-classification-compatible flow to run the baseline sanity check.
+- Required revert trigger: once player sanity passes, switch `data_preprocess.py` back to the microtonal-compatible version before continuing makam debugging/evaluation.
 - If the player-classification checkpoint is unavailable, classify result as "pipeline wiring validated, model-quality validation pending checkpoint".
 - Path normalization must be consistent across scripts (especially split CSV, label map, processed token directory).
 - Dependency drift (especially `accelerate` utility API changes) must be documented in handoff notes.
+- If baseline-comparable F1 is required, either restore the original `finetune_player_classification` training/eval logic or port its metric path explicitly; current wrapper may only provide generic validation outputs.
