@@ -12,6 +12,7 @@ import contextlib
 
 
 import torch
+import torch.nn.functional as F
 import torch.cuda.nccl as nccl
 import torch.distributed as dist
 from torch.distributed.fsdp import StateDictType
@@ -28,6 +29,7 @@ from llama_recipes.utils.pitch_confusion_utils import (
     init_pitch_confusion_state,
     update_pitch_confusions,
     save_pitch_confusion_artifacts,
+    compute_pitch_confusion_diagnostics,
     compute_western_drift_metrics,
 )
 # from accelerate.utils import is_xpu_available, is_ccl_available
@@ -648,24 +650,97 @@ def _should_run_pitch_confusion(train_config, rank=None):
         return rank == 0
     return True
 
+# Pitch confusion: Added utility function to find the GRU accuracy dict from the model, even if it's wrapped in multiple layers of FSDP or DDP. This is needed for the pitch confusion analysis and logging.
+def _collect_gru_acc_metrics(model):
+    """Find per-attribute GRU accuracy dict even under nested wrappers."""
+    candidates = []
+    visited = set()
+    stack = [model]
+
+    while stack:
+        mod = stack.pop()
+        if mod is None:
+            continue
+        obj_id = id(mod)
+        if obj_id in visited:
+            continue
+        visited.add(obj_id)
+        candidates.append(mod)
+
+        for attr in ("module", "base_model", "model"):
+            child = getattr(mod, attr, None)
+            if child is not None:
+                stack.append(child)
+
+    for cand in candidates:
+        gru_acc = getattr(cand, "_gru_acc", None)
+        if isinstance(gru_acc, dict) and len(gru_acc) > 0:
+            return gru_acc
+    return {}
+
+# [Turned off by default] Auxiliary CE loss on pitch tokens to directly optimize pitch accuracy, which is critical for music generation quality. This is computed in the training loop when generation logits are available, and the tokenizer has a pitch_dict to identify which token IDs correspond to pitch targets.
+def _compute_pitch_aux_ce_loss(labels, generation_logits, tokenizer, device):
+    """Compute CE loss only on pitch targets to directly improve pitch accuracy."""
+    if generation_logits is None or labels is None:
+        return None
+
+    if not hasattr(tokenizer, "pitch_dict"):
+        return None
+
+    pitch_ids = sorted(set(int(v) for v in tokenizer.pitch_dict.values()))
+    if len(pitch_ids) == 0:
+        return None
+
+    labels_flat = labels.reshape(-1)
+    logits_flat = generation_logits.reshape(-1, generation_logits.size(-1))
+
+    min_len = min(labels_flat.numel(), logits_flat.size(0))
+    if min_len <= 0:
+        return None
+
+    labels_flat = labels_flat[:min_len]
+    logits_flat = logits_flat[:min_len]
+
+    valid_mask = labels_flat >= 0
+    if valid_mask.sum().item() == 0:
+        return None
+
+    pitch_id_tensor = torch.tensor(pitch_ids, device=device, dtype=labels_flat.dtype)
+    pitch_mask = torch.isin(labels_flat, pitch_id_tensor)
+    target_mask = valid_mask & pitch_mask
+
+    if target_mask.sum().item() == 0:
+        return None
+
+    return F.cross_entropy(logits_flat[target_mask], labels_flat[target_mask].long())
+
 
 def _maybe_log_pitch_confusion_to_wandb(train_config, wandb_run, artifacts, metrics, step):
     if wandb_run is None or not getattr(train_config, 'pitch_confusion_log_wandb', True):
         return
-    try:
-        import wandb
-    except ImportError:
-        return
 
     log_dict = {}
-    if os.path.exists(artifacts['overall_counts_png']):
-        log_dict['pitch_confusion/overall_counts'] = wandb.Image(artifacts['overall_counts_png'])
-    if os.path.exists(artifacts['overall_row_norm_png']):
-        log_dict['pitch_confusion/overall_row_norm'] = wandb.Image(artifacts['overall_row_norm_png'])
-    if os.path.exists(artifacts['western_counts_png']):
-        log_dict['pitch_confusion/western12_counts'] = wandb.Image(artifacts['western_counts_png'])
-    if os.path.exists(artifacts['western_row_norm_png']):
-        log_dict['pitch_confusion/western12_row_norm'] = wandb.Image(artifacts['western_row_norm_png'])
+    if getattr(train_config, 'pitch_confusion_save_plots', True):
+        try:
+            import wandb
+        except ImportError:
+            wandb = None
+
+        if wandb is not None:
+            image_keys = [
+                ('overall_counts_png', 'pitch_confusion/overall_counts'),
+                ('overall_row_norm_png', 'pitch_confusion/overall_row_norm'),
+                ('western_counts_png', 'pitch_confusion/western12_counts'),
+                ('western_row_norm_png', 'pitch_confusion/western12_row_norm'),
+            ]
+            for art_key, wb_key in image_keys:
+                img_path = artifacts.get(art_key, '') if isinstance(artifacts, dict) else ''
+                if img_path and os.path.exists(img_path):
+                    try:
+                        log_dict[wb_key] = wandb.Image(img_path)
+                    except Exception:
+                        # Keep metric logging alive even if an image is too large/corrupt.
+                        pass
 
     for k, v in metrics.items():
         log_dict[f'pitch_confusion/{k}'] = v
@@ -757,14 +832,18 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
             western_pre_matrix = pre_summary.get('matrix_western')
             if western_pre_matrix is not None:
                 pitch_confusion_ctx['western_pre_matrix'] = western_pre_matrix
+                pre_diag = pre_summary.get('diagnostics', {})
+                pre_metrics = {
+                    'western_pre_total_pitch_samples': pre_summary.get('total_pitch_samples', 0),
+                    'western_pre_ignored_pred_non_pitch': pre_summary.get('ignored_pred_non_pitch', 0),
+                }
+                for k, v in pre_diag.items():
+                    pre_metrics[f'western_pre_{k}'] = v
                 _maybe_log_pitch_confusion_to_wandb(
                     train_config,
                     wandb_run,
                     pre_summary.get('artifacts', {}),
-                    {
-                        'western_pre_total_pitch_samples': pre_summary.get('total_pitch_samples', 0),
-                        'western_pre_ignored_pred_non_pitch': pre_summary.get('ignored_pred_non_pitch', 0),
-                    },
+                    pre_metrics,
                     step=0,
                 )
 
@@ -803,9 +882,29 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                             else:
                                 batch[key] = batch[key].to('cuda:0')
                     with autocast():
-                        loss = model(**batch).loss
+                        outputs = model(**batch)
+                        loss = outputs.loss
                     # Microtonal embedding regularization (anchor + smoothness)
                     ce_loss = loss.detach().float().item()
+                    pitch_aux_val = None
+                    pitch_aux_val = None
+                    pitch_aux = None
+                    # Compute auxiliary pitch CE when a positive weight and generation logits exist.
+                    # Adding it to the loss is gated by `enable_micro_pitch_ce`, but we still
+                    # compute and record the value for `microtonal_reg` when present.
+                    pitch_aux_weight = float(getattr(train_config, 'micro_pitch_ce_weight', 0.0) or 0.0)
+                    if pitch_aux_weight > 0.0 and getattr(outputs, 'generation_logits', None) is not None:
+                        pitch_aux = _compute_pitch_aux_ce_loss(
+                            batch.get('labels', None),
+                            outputs.generation_logits,
+                            tokenizer,
+                            loss.device,
+                        )
+                        if pitch_aux is not None:
+                            pitch_aux_val = pitch_aux.detach().float().item()
+                            if getattr(train_config, 'enable_micro_pitch_ce', True):
+                                # If flag is on, then add the auxiliary pitch CE loss to the main loss with the specified weight
+                                loss = loss + (pitch_aux_weight * pitch_aux)
                     if microtonal_reg is not None:
                         reg = microtonal_reg
                         w_ids = reg['western_ids']
@@ -821,10 +920,14 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                             torch.mean((reg['decoder_emb_weight'][right] - reg['decoder_emb_weight'][left]) ** 2) +
                             torch.mean((reg['lm_head_weight'][right] - reg['lm_head_weight'][left]) ** 2)
                         ) * reg['lambda_smooth']
+
+                        # Add microtonal reg to the loss
                         loss = loss + L_anchor + L_smooth
                         reg['_last_L_anchor'] = L_anchor.detach().float().item()
                         reg['_last_L_smooth'] = L_smooth.detach().float().item()
                         reg['_last_ce_loss'] = ce_loss
+                        if pitch_aux_val is not None:
+                            reg['_last_pitch_ce_loss'] = pitch_aux_val
                     loss = loss / gradient_accumulation_steps
                     if train_config.save_metrics:
                         train_step_loss.append(loss.detach().float().item())
@@ -912,13 +1015,12 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                                         log_dict['train/micro_emb_norm'] = micro_emb.norm().item()
                                         log_dict['train/micro_head_norm'] = micro_head.norm().item()
                             # Log per-attribute GRU decoder accuracy
-                            inner_model = getattr(model, 'module', model)
-                            if hasattr(inner_model, 'base_model'):
-                                inner_model = inner_model.base_model.model
-                            gru_acc = getattr(inner_model, '_gru_acc', None)
+                            gru_acc = _collect_gru_acc_metrics(model)
                             if gru_acc:
                                 for attr_name, acc in gru_acc.items():
                                     log_dict[f'train/gru_acc/{attr_name}'] = acc
+                            if microtonal_reg is not None and '_last_pitch_ce_loss' in microtonal_reg:
+                                log_dict['train/pitch_ce_loss'] = microtonal_reg['_last_pitch_ce_loss']
                             wandb_run.log(log_dict, step=epoch * len(train_dataloader) + step)
 
                     pbar.set_description(f"Training Epoch: {epoch}/{train_config.num_epochs}, step {step}/{len(train_dataloader)} completed (loss: {loss.detach().float()})")
@@ -1047,10 +1149,13 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                 tokenizer, wandb_run, confusion_request=req
             )
             _, _, _, _, conf_summary = eval_out
+            conf_diag = conf_summary.get('diagnostics', {})
             conf_metrics = {
                 f'overall_epoch_{epoch}_total_pitch_samples': conf_summary.get('total_pitch_samples', 0),
                 f'overall_epoch_{epoch}_ignored_pred_non_pitch': conf_summary.get('ignored_pred_non_pitch', 0),
             }
+            for k, v in conf_diag.items():
+                conf_metrics[f'overall_epoch_{epoch}_{k}'] = v
             _maybe_log_pitch_confusion_to_wandb(
                 train_config,
                 wandb_run,
@@ -1064,6 +1169,38 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
             save_to_json(metrics_filename, train_step_loss, train_loss, train_step_perplexity, train_prep, val_step_loss, val_loss, val_step_perplexity, val_prep)
 
     avg_epoch_time = sum(epoch_times)/ len(epoch_times)
+
+    # Always capture end-of-training overall confusion metrics from the final
+    # model state. This keeps evaluation aligned with CPT outcome goals even
+    # when max_train_step stops training before scheduled epoch snapshots.
+    if confusion_active and eval_dataloader is not None:
+        final_req = {
+            'enabled': True,
+            'artifact_prefix': 'overall_final',
+            'save_dir': confusion_save_dir,
+            'expected_pitch_dict_size': len(tokenizer.pitch_dict),
+            'max_eval_step': getattr(train_config, 'pitch_confusion_max_eval_step', 0),
+        }
+        eval_out = evaluation(
+            model, train_config, eval_dataloader, local_rank,
+            tokenizer, wandb_run, confusion_request=final_req
+        )
+        _, _, _, _, final_summary = eval_out
+        final_diag = final_summary.get('diagnostics', {})
+        final_metrics = {
+            'overall_final_total_pitch_samples': final_summary.get('total_pitch_samples', 0),
+            'overall_final_ignored_pred_non_pitch': final_summary.get('ignored_pred_non_pitch', 0),
+        }
+        for k, v in final_diag.items():
+            final_metrics[f'overall_final_{k}'] = v
+        results.update(final_metrics)
+        _maybe_log_pitch_confusion_to_wandb(
+            train_config,
+            wandb_run,
+            final_summary.get('artifacts', {}),
+            final_metrics,
+            step=total_train_steps,
+        )
 
     if confusion_active and pitch_confusion_ctx is not None:
         western_eval_dataloader = pitch_confusion_ctx.get('western_eval_dataloader')
@@ -1081,10 +1218,13 @@ def train_con_gen(model, train_dataloader,eval_dataloader, tokenizer, optimizer,
                 tokenizer, wandb_run, confusion_request=req
             )
             _, _, _, _, post_summary = eval_out
+            post_diag = post_summary.get('diagnostics', {})
             drift_metrics = {
                 'western_post_total_pitch_samples': post_summary.get('total_pitch_samples', 0),
                 'western_post_ignored_pred_non_pitch': post_summary.get('ignored_pred_non_pitch', 0),
             }
+            for k, v in post_diag.items():
+                drift_metrics[f'western_post_{k}'] = v
             if western_pre_matrix is not None and post_summary.get('matrix_western') is not None:
                 drift_metrics.update(
                     compute_western_drift_metrics(
@@ -1153,6 +1293,13 @@ def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb
         confusion_state = init_pitch_confusion_state(tokenizer)
         confusion_max_eval_step = int(confusion_request.get('max_eval_step', 0) or 0)
 
+    if is_xpu_available():
+        eval_device = 'xpu:0'
+    elif torch.cuda.is_available():
+        eval_device = 'cuda:0'
+    else:
+        eval_device = 'cpu'
+
     with MemoryTrace() as memtrace:
         for step, batch in enumerate(tqdm(eval_dataloader,colour="green", desc="evaluating Epoch", dynamic_ncols=True)):
             total_eval_steps += 1
@@ -1167,10 +1314,7 @@ def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb
                 if train_config.enable_fsdp:
                     batch[key] = batch[key].to(local_rank)
                 else:
-                    if is_xpu_available():
-                        batch[key] = batch[key].to('xpu:0')
-                    else:
-                        batch[key] = batch[key].to('cuda:0')
+                    batch[key] = batch[key].to(eval_device)
             # Ensure no gradients are computed for this scope to save memory
             with torch.no_grad():
                 # Forward pass and compute loss
@@ -1219,11 +1363,13 @@ def evaluation(model,train_config, eval_dataloader, local_rank, tokenizer, wandb
             save_dir=save_dir,
             artifact_prefix=artifact_prefix,
             expected_pitch_dict_size=expected_pitch_dict_size,
+            save_plots=bool(getattr(train_config, 'pitch_confusion_save_plots', True)),
         )
         summary = {
             'artifacts': artifacts,
             'total_pitch_samples': int(confusion_state.total_pitch_samples),
             'ignored_pred_non_pitch': int(confusion_state.ignored_pred_non_pitch),
+            'diagnostics': compute_pitch_confusion_diagnostics(confusion_state),
             'matrix_western': confusion_state.matrix_western,
             'matrix_overall': confusion_state.matrix_overall,
             'pitch_token_ids': confusion_state.pitch_token_ids,
@@ -1405,11 +1551,12 @@ def print_model_size(model, config, rank: int = 0) -> None:
     """
     if rank == 0:
         print(f"--> Model {config.model_name}")
-        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Trainable parameters: {trainable_params / 1e6:.2f} Million")
         print(f"\n--> {config.model_name} has {total_params / 1e6} Million params\n")
-        print(f"Trainable %: {(trainable_params / total_params) * 100:.2f}%\n")
+        trainable_pct = (trainable_params / total_params) * 100 if total_params > 0 else 0.0
+        print(f"Trainable %: {trainable_pct:.2f}%\n")
 
 
 def get_policies(cfg, rank):

@@ -57,16 +57,20 @@ class train_config:
     one_gpu: bool = False
     save_model: bool = True
     trained_checkpoint_path: str = "PATH/to/saved/trained/model"
+    base_checkpoint_path: str = "models/moonbeam_309M.pt"  # Used when trained_checkpoint_path points to a PEFT adapter directory
     dist_checkpoint_root_folder: str="PATH/to/save/FSDP/model" # will be used if using FSDP
     dist_checkpoint_folder: str="fine-tuned" # will be used if using FSDP
     save_optimizer: bool=False # will be used if using FSDP
     use_fast_kernels: bool = False # Enable using SDPA from PyTroch Accelerated Transformers, make use Flash Attention and Xformer memory-efficient kernels
     pure_bf16: bool = False  # Convert model to bf16 (single-GPU; FSDP/DDP use their own configs)
     use_wandb: bool = False # Enable wandb for experient tracking
+    wandb_run_name: str = "ablation"  # WandB run title
+    wandb_tags: str = "309M"  # Comma-separated WandB tags
     log_interval: int = 10  # Log to wandb every N training steps (reduces noise)
     enable_pitch_confusion: bool = False  # Compute/save pitch confusion artifacts during eval
     pitch_confusion_dir: str = ""  # Defaults to output_dir/pitch_confusion when empty
     pitch_confusion_max_eval_step: int = 0  # 0 = use all eval batches
+    pitch_confusion_save_plots: bool = True  # Save confusion PNG/SVG plots
     pitch_confusion_log_wandb: bool = True  # Log confusion images/metrics to wandb when enabled
     validation_only: bool = False  # Run evaluation pipeline only (no training loop)
     save_metrics: bool = False # saves training metrics to a json file for later plotting
@@ -75,6 +79,14 @@ class train_config:
     use_profiler: bool = False # Enable pytorch profiler, can not be used with flop counter at the same time.
     profiler_dir: str = "PATH/to/save/profiler/results" # will be used if using profiler
     model_config: str = ""  # Path to model config JSON
+    microtonal: bool = False  # Master switch for microtonal mode (vocab expansion/interpolation/regularization)
+    micro_lambda_anchor: float = 0.5  # L-anchor strength for western row preservation
+    micro_lambda_smooth: float = 0.05  # L-smooth strength for adjacent microtonal rows
+    micro_warmup_freeze_ratio: float = 0.10  # Fraction of total steps to freeze western rows early
+    micro_new_row_lr_scale: float = 3.0  # Gradient scaling factor for new microtonal rows
+    micro_pitch_ce_weight: float = 0.0  # Optional auxiliary CE weight on pitch tokens only
+    enable_micro_pitch_ce: bool = False  # Master switch to enable/disable auxiliary pitch CE loss
+    micro_train_pitch_only: bool = True  # Freeze non-pitch params in microtonal mode
     western_data_dir: str = ""  # Western replay data directory (for microtonal CPT data mixing)
     western_csv_file: str = ""  # Western data CSV file path
-    mixing_alpha: float = 0.8  # Fraction of microtonal samples when mixing (0.8 = 80% micro, 20% western)
+    mixing_alpha: float = 0.2  # Fraction of western samples when mixing (0.2 = 20% western, 80% micro)

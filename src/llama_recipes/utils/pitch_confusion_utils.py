@@ -51,6 +51,11 @@ def _extract_pitch_ids_from_batch(labels: torch.Tensor, generation_logits: torch
 
 
 def _western_token_ids_from_pitch_dict(pitch_dict: Dict[int, int]) -> List[int]:
+    keys = set(int(k) for k in pitch_dict.keys())
+    # Western (non-microtonal) tokenizer uses semitone IDs 0..11 (+12/13 SOS/EOS).
+    if len(keys) == 14 and max(keys) == 13 and min(keys) == 0:
+        return [int(pitch_dict[k]) for k in range(12)]
+
     western = []
     for cents, token_id in pitch_dict.items():
         if cents in (1200, 1201):
@@ -61,6 +66,11 @@ def _western_token_ids_from_pitch_dict(pitch_dict: Dict[int, int]) -> List[int]:
 
 
 def _western14_token_ids_from_pitch_dict(pitch_dict: Dict[int, int]) -> List[int]:
+    keys = set(int(k) for k in pitch_dict.keys())
+    # Western (non-microtonal) tokenizer uses pitch keys 0..13 directly.
+    if len(keys) == 14 and max(keys) == 13 and min(keys) == 0:
+        return [int(pitch_dict[k]) for k in range(14)]
+
     # Keep semitones in musical order plus pitch SOS/EOS at the end.
     required_cents = list(range(0, 1200, 100)) + [1200, 1201]
     missing = [c for c in required_cents if c not in pitch_dict]
@@ -146,6 +156,120 @@ def _normalize_rows(matrix: np.ndarray) -> np.ndarray:
     return out
 
 
+def compute_pitch_confusion_diagnostics(state: PitchConfusionState) -> Dict[str, float]:
+    total = int(state.matrix_overall.sum())
+    if total <= 0:
+        return {
+            "total_events": 0,
+            "actual_micro": 0,
+            "pred_micro": 0,
+            "actual_western14": 0,
+            "pred_western14": 0,
+            "micro_diag": 0,
+            "western14_diag": 0,
+            "micro_recall": 0.0,
+            "micro_precision": 0.0,
+            "micro_f1": 0.0,
+            "micro_tp": 0,
+            "micro_fp": 0,
+            "micro_fn": 0,
+            "micro_tn": 0,
+            "western14_recall": 0.0,
+            "western14_precision": 0.0,
+            "western14_f1": 0.0,
+            "western14_tp": 0,
+            "western14_fp": 0,
+            "western14_fn": 0,
+            "western14_tn": 0,
+            "pred_western14_ratio": 0.0,
+            "pred_micro_ratio": 0.0,
+            "micro_to_western14_leak_rate": 0.0,
+            "western14_to_micro_leak_rate": 0.0,
+            "true_support": 0,
+            "pred_support": 0,
+            "true_micro_support": 0,
+            "pred_micro_support": 0,
+        }
+
+    western14_idx = [state.id_to_overall_idx[tid] for tid in state.western14_token_ids]
+    western14_set = set(western14_idx)
+    all_idx = np.arange(state.matrix_overall.shape[0])
+    micro_idx = np.array([i for i in all_idx if i not in western14_set], dtype=np.int64)
+
+    mat = state.matrix_overall
+    actual_w14 = int(mat[western14_idx, :].sum())
+    pred_w14 = int(mat[:, western14_idx].sum())
+    actual_micro = int(mat[micro_idx, :].sum()) if micro_idx.size > 0 else 0
+    pred_micro = int(mat[:, micro_idx].sum()) if micro_idx.size > 0 else 0
+
+    diag = np.diag(mat)
+    western14_diag = int(diag[western14_idx].sum())
+    micro_diag = int(diag[micro_idx].sum()) if micro_idx.size > 0 else 0
+
+    micro_to_w14 = int(mat[np.ix_(micro_idx, western14_idx)].sum()) if micro_idx.size > 0 else 0
+    w14_to_micro = int(mat[np.ix_(western14_idx, micro_idx)].sum()) if micro_idx.size > 0 else 0
+
+    # Grouped binary confusion metrics (microtonal vs western14 bucket)
+    micro_tp = int(mat[np.ix_(micro_idx, micro_idx)].sum()) if micro_idx.size > 0 else 0
+    micro_fp = max(pred_micro - micro_tp, 0)
+    micro_fn = max(actual_micro - micro_tp, 0)
+    micro_tn = max(total - micro_tp - micro_fp - micro_fn, 0)
+
+    western14_tp = int(mat[np.ix_(western14_idx, western14_idx)].sum())
+    western14_fp = max(pred_w14 - western14_tp, 0)
+    western14_fn = max(actual_w14 - western14_tp, 0)
+    western14_tn = max(total - western14_tp - western14_fp - western14_fn, 0)
+
+    micro_precision = float(micro_diag / pred_micro) if pred_micro > 0 else 0.0
+    micro_recall = float(micro_diag / actual_micro) if actual_micro > 0 else 0.0
+    micro_f1 = (
+        float(2.0 * micro_precision * micro_recall / (micro_precision + micro_recall))
+        if (micro_precision + micro_recall) > 0 else 0.0
+    )
+
+    western14_precision = float(western14_diag / pred_w14) if pred_w14 > 0 else 0.0
+    western14_recall = float(western14_diag / actual_w14) if actual_w14 > 0 else 0.0
+    western14_f1 = (
+        float(2.0 * western14_precision * western14_recall / (western14_precision + western14_recall))
+        if (western14_precision + western14_recall) > 0 else 0.0
+    )
+
+    true_counts = mat.sum(axis=1)
+    pred_counts = mat.sum(axis=0)
+
+    return {
+        "total_events": total,
+        "actual_micro": actual_micro,
+        "pred_micro": pred_micro,
+        "actual_western14": actual_w14,
+        "pred_western14": pred_w14,
+        "micro_diag": micro_diag,
+        "western14_diag": western14_diag,
+        "micro_recall": micro_recall,
+        "micro_precision": micro_precision,
+        "micro_f1": micro_f1,
+        "micro_tp": micro_tp,
+        "micro_fp": micro_fp,
+        "micro_fn": micro_fn,
+        "micro_tn": micro_tn,
+        "western14_recall": western14_recall,
+        "western14_precision": western14_precision,
+        "western14_f1": western14_f1,
+        "western14_tp": western14_tp,
+        "western14_fp": western14_fp,
+        "western14_fn": western14_fn,
+        "western14_tn": western14_tn,
+        "pred_western14_ratio": float(pred_w14 / total),
+        "pred_micro_ratio": float(pred_micro / total),
+        "micro_to_western14_leak_rate": float(micro_to_w14 / actual_micro) if actual_micro > 0 else 0.0,
+        "western14_to_micro_leak_rate": float(w14_to_micro / actual_w14) if actual_w14 > 0 else 0.0,
+        "true_support": int((true_counts > 0).sum()),
+        "pred_support": int((pred_counts > 0).sum()),
+        "true_micro_support": int((true_counts[micro_idx] > 0).sum()) if micro_idx.size > 0 else 0,
+        "pred_micro_support": int((pred_counts[micro_idx] > 0).sum()) if micro_idx.size > 0 else 0,
+    }
+
+
 def _plot_heatmap(
     matrix: np.ndarray,
     token_ids: List[int],
@@ -153,19 +277,29 @@ def _plot_heatmap(
     title: str,
     normalize_rows: bool = False,
     max_visible_tick_labels: int = 60,
+    show_all_tick_labels: bool = False,
 ) -> None:
     data = _normalize_rows(matrix) if normalize_rows else matrix.astype(np.float64)
 
     n = len(token_ids)
-    # Scale canvas with matrix size so dense plots remain legible.
-    side = min(26, max(10, n / 55.0))
-    fig, ax = plt.subplots(figsize=(side, side * 0.8), dpi=160)
+    # Exhaustive-label mode for debugging: render all token IDs on both axes.
+    if show_all_tick_labels and n > max_visible_tick_labels:
+        side = min(120.0, max(28.0, n / 12.0))
+        dpi = 220
+        tick_font = 2
+    else:
+        side = min(26.0, max(10.0, n / 18.0))
+        dpi = 180
+        tick_font = 6
+
+    fig, ax = plt.subplots(figsize=(side, side * 0.88), dpi=dpi)
     im = ax.imshow(data, interpolation="nearest", aspect="auto", cmap="viridis")
     cbar = fig.colorbar(im, ax=ax)
     cbar.ax.set_ylabel("row-normalized" if normalize_rows else "count", rotation=-90, va="bottom")
 
-    # Keep the full matrix, but sparsify axis labels for readability.
-    if n <= max_visible_tick_labels:
+    if show_all_tick_labels:
+        tick_positions = np.arange(n)
+    elif n <= max_visible_tick_labels:
         tick_positions = np.arange(n)
     else:
         stride = int(np.ceil(n / float(max_visible_tick_labels)))
@@ -176,13 +310,17 @@ def _plot_heatmap(
 
     ax.set_xticks(tick_positions)
     ax.set_yticks(tick_positions)
-    ax.set_xticklabels(tick_labels, rotation=90, fontsize=6)
-    ax.set_yticklabels(tick_labels, fontsize=6)
+    ax.set_xticklabels(tick_labels, rotation=90, fontsize=tick_font)
+    ax.set_yticklabels(tick_labels, fontsize=tick_font)
     ax.set_xlabel("Predicted pitch language token ID")
     ax.set_ylabel("True pitch language token ID")
     ax.set_title(title)
     fig.tight_layout()
     fig.savefig(output_path)
+    if show_all_tick_labels:
+        # Save a vector version for zooming while preserving all tick labels.
+        svg_path = os.path.splitext(output_path)[0] + ".svg"
+        fig.savefig(svg_path)
     plt.close(fig)
 
 
@@ -191,6 +329,7 @@ def save_pitch_confusion_artifacts(
     save_dir: str,
     artifact_prefix: str,
     expected_pitch_dict_size: Optional[int] = None,
+    save_plots: bool = True,
 ) -> Dict[str, str]:
     os.makedirs(save_dir, exist_ok=True)
 
@@ -218,52 +357,67 @@ def save_pitch_confusion_artifacts(
 
     with open(token_map_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["matrix_index", "pitch_token_id"])
+        writer.writerow(["pitch_token_id", "actual_count", "predicted_count"])
+        actual_counts = state.matrix_overall.sum(axis=1)
+        predicted_counts = state.matrix_overall.sum(axis=0)
         for idx, token_id in enumerate(state.pitch_token_ids):
-            writer.writerow([idx, token_id])
+            writer.writerow([
+                token_id,
+                int(actual_counts[idx]),
+                int(predicted_counts[idx]),
+            ])
 
-    _plot_heatmap(
-        state.matrix_overall,
-        state.pitch_token_ids,
-        overall_cnt_png,
-        title=f"Pitch Confusion (overall, token IDs) [{artifact_prefix}]",
-        normalize_rows=False,
-    )
-    _plot_heatmap(
-        state.matrix_overall,
-        state.pitch_token_ids,
-        overall_row_png,
-        title=f"Pitch Confusion (overall row-normalized, token IDs) [{artifact_prefix}]",
-        normalize_rows=True,
-    )
-    _plot_heatmap(
-        state.matrix_western,
-        state.western_token_ids,
-        western_cnt_png,
-        title=f"Pitch Confusion (western 12x12, token IDs) [{artifact_prefix}]",
-        normalize_rows=False,
-    )
-    _plot_heatmap(
-        state.matrix_western,
-        state.western_token_ids,
-        western_row_png,
-        title=f"Pitch Confusion (western 12x12 row-normalized, token IDs) [{artifact_prefix}]",
-        normalize_rows=True,
-    )
-    _plot_heatmap(
-        state.matrix_western14,
-        state.western14_token_ids,
-        western14_cnt_png,
-        title=f"Pitch Confusion (western+SOS/EOS 14x14, token IDs) [{artifact_prefix}]",
-        normalize_rows=False,
-    )
-    _plot_heatmap(
-        state.matrix_western14,
-        state.western14_token_ids,
-        western14_row_png,
-        title=f"Pitch Confusion (western+SOS/EOS 14x14 row-normalized, token IDs) [{artifact_prefix}]",
-        normalize_rows=True,
-    )
+    if save_plots:
+        _plot_heatmap(
+            state.matrix_overall,
+            state.pitch_token_ids,
+            overall_cnt_png,
+            title=f"Pitch Confusion (overall, token IDs) [{artifact_prefix}]",
+            normalize_rows=False,
+            show_all_tick_labels=True,
+        )
+        _plot_heatmap(
+            state.matrix_overall,
+            state.pitch_token_ids,
+            overall_row_png,
+            title=f"Pitch Confusion (overall row-normalized, token IDs) [{artifact_prefix}]",
+            normalize_rows=True,
+            show_all_tick_labels=True,
+        )
+        _plot_heatmap(
+            state.matrix_western,
+            state.western_token_ids,
+            western_cnt_png,
+            title=f"Pitch Confusion (western 12x12, token IDs) [{artifact_prefix}]",
+            normalize_rows=False,
+            show_all_tick_labels=True,
+        )
+        _plot_heatmap(
+            state.matrix_western,
+            state.western_token_ids,
+            western_row_png,
+            title=f"Pitch Confusion (western 12x12 row-normalized, token IDs) [{artifact_prefix}]",
+            normalize_rows=True,
+            show_all_tick_labels=True,
+        )
+        _plot_heatmap(
+            state.matrix_western14,
+            state.western14_token_ids,
+            western14_cnt_png,
+            title=f"Pitch Confusion (western+SOS/EOS 14x14, token IDs) [{artifact_prefix}]",
+            normalize_rows=False,
+            show_all_tick_labels=True,
+        )
+        _plot_heatmap(
+            state.matrix_western14,
+            state.western14_token_ids,
+            western14_row_png,
+            title=f"Pitch Confusion (western+SOS/EOS 14x14 row-normalized, token IDs) [{artifact_prefix}]",
+            normalize_rows=True,
+            show_all_tick_labels=True,
+        )
+
+    diagnostics = compute_pitch_confusion_diagnostics(state)
 
     with open(meta_json, "w", encoding="utf-8") as f:
         json.dump(
@@ -275,6 +429,7 @@ def save_pitch_confusion_artifacts(
                 "pitch_dict_size": len(state.pitch_token_ids),
                 "total_pitch_samples": int(state.total_pitch_samples),
                 "ignored_pred_non_pitch": int(state.ignored_pred_non_pitch),
+                "diagnostics": diagnostics,
             },
             f,
             indent=2,
@@ -285,12 +440,12 @@ def save_pitch_confusion_artifacts(
         "western_npy": western_npy,
         "western14_npy": western14_npy,
         "overall_token_index_map_csv": token_map_csv,
-        "overall_counts_png": overall_cnt_png,
-        "overall_row_norm_png": overall_row_png,
-        "western_counts_png": western_cnt_png,
-        "western_row_norm_png": western_row_png,
-        "western14_counts_png": western14_cnt_png,
-        "western14_row_norm_png": western14_row_png,
+        "overall_counts_png": overall_cnt_png if save_plots else "",
+        "overall_row_norm_png": overall_row_png if save_plots else "",
+        "western_counts_png": western_cnt_png if save_plots else "",
+        "western_row_norm_png": western_row_png if save_plots else "",
+        "western14_counts_png": western14_cnt_png if save_plots else "",
+        "western14_row_norm_png": western14_row_png if save_plots else "",
         "meta_json": meta_json,
     }
 

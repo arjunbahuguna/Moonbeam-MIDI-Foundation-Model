@@ -1,11 +1,12 @@
 import os
 import json
 import dataclasses
+import re
 import fire
 import random
 import torch
 import torch.optim as optim
-from peft import get_peft_model, prepare_model_for_kbit_training
+from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     ShardingStrategy
@@ -70,9 +71,14 @@ def setup_wandb(train_config, fsdp_config, llama_config, **kwargs):
     init_dict["project"] = "uncon_gen"
 
     # Add run name and tags for better organization and filtering in the wandb dashboard
-    # Include config values for easy reference
-    init_dict["name"] = "data_mixing" # Optional: set a custom run name for easier identification in the dashboard]
-    init_dict["tags"] = ["309M", "symbtr_lmd"]
+    run_name = getattr(train_config, "wandb_run_name", "ablation")
+    tag_str = getattr(train_config, "wandb_tags", "309M")
+    if isinstance(tag_str, str):
+        run_tags = [t.strip() for t in tag_str.split(",") if t.strip()]
+    else:
+        run_tags = list(tag_str)
+    init_dict["name"] = run_name
+    init_dict["tags"] = run_tags
 
     # Initialize and configure wandb
     run = wandb.init(**init_dict)
@@ -103,6 +109,7 @@ def main(**kwargs):
     train_config, fsdp_config, ddp_config = TRAIN_CONFIG(), FSDP_CONFIG(), DDP_CONFIG()
     update_config((train_config, fsdp_config, ddp_config), **kwargs)
     model_config_path = train_config.model_config
+    use_microtonal_mode = bool(getattr(train_config, 'microtonal', False))
     print("updated training config", train_config)
     # Set the seeds for reproducibility
     if is_xpu_available():
@@ -139,6 +146,21 @@ def main(**kwargs):
 
     else: #DDP and non-distributed training
         llama_config = LlamaConfig.from_pretrained(model_config_path)
+        # `--microtonal` is the runtime master switch for vocab behavior.
+        if use_microtonal_mode:
+            llama_config.microtonal = True
+        else:
+            llama_config.microtonal = False
+            llama_config.pitch_class_vocab_size = 14
+            llama_config.decode_vocab_size = (
+                1
+                + llama_config.onset_vocab_size
+                + llama_config.dur_vocab_size
+                + llama_config.octave_vocab_size
+                + 14
+                + llama_config.instrument_vocab_size
+                + llama_config.velocity_vocab_size
+            )
         llama_config.use_cache = use_cache
         print(f"model_config:{llama_config}")
 
@@ -153,14 +175,47 @@ def main(**kwargs):
             sos_token=llama_config.sos_token,
             eos_token=llama_config.eos_token,
             pad_token=llama_config.pad_token,
-            microtonal=getattr(llama_config, 'microtonal', False),
+            microtonal=use_microtonal_mode,
             pitchbend_sensitivity=getattr(llama_config, 'pitchbend_sensitivity', 2.0),
             microtonal_resolution=getattr(llama_config, 'microtonal_resolution', 1),
         )
 
         model = LlamaForCausalLM(llama_config)
 
-        model_checkpoint = torch.load(train_config.trained_checkpoint_path)
+        checkpoint_path = train_config.trained_checkpoint_path
+        adapter_dir_to_merge = None
+        if os.path.isdir(checkpoint_path):
+            # Treat directory input as PEFT adapter path (direct or parent of many step dirs).
+            direct_adapter = os.path.join(checkpoint_path, "adapter_model.safetensors")
+            if os.path.isfile(direct_adapter):
+                adapter_dir_to_merge = checkpoint_path
+            else:
+                candidate_dirs = []
+                for child in os.listdir(checkpoint_path):
+                    child_path = os.path.join(checkpoint_path, child)
+                    if os.path.isdir(child_path) and os.path.isfile(os.path.join(child_path, "adapter_model.safetensors")):
+                        candidate_dirs.append(child_path)
+
+                if not candidate_dirs:
+                    raise ValueError(
+                        f"trained_checkpoint_path points to a directory with no adapter_model.safetensors: {checkpoint_path}"
+                    )
+
+                def _step_key(path):
+                    name = os.path.basename(path)
+                    m = re.match(r"^(\d+)-(\d+)\.safetensors$", name)
+                    if m:
+                        return int(m.group(1)), int(m.group(2))
+                    return -1, -1
+
+                adapter_dir_to_merge = max(candidate_dirs, key=_step_key)
+
+            checkpoint_path = train_config.base_checkpoint_path
+            print(
+                f"Detected adapter checkpoint directory. Using base checkpoint: {checkpoint_path} and adapter: {adapter_dir_to_merge}"
+            )
+
+        model_checkpoint = torch.load(checkpoint_path)
 
         checkpoint = model_checkpoint['model_state_dict']
         new_state_dict = {}
@@ -170,15 +225,24 @@ def main(**kwargs):
             else:
                 new_state_dict[k] = v
 
-        # Expand decoder_embedding and lm_head for microtonal vocab
-        expanded_state_dict = expand_vocab_with_interpolation(
-            new_state_dict, llama_config, tokenizer
-        )
-        print(f"Vocab expanded: {len(new_state_dict)} keys, decoder_embedding {new_state_dict['decoder_embedding.weight'].shape} -> {expanded_state_dict['decoder_embedding.weight'].shape}")
+        if use_microtonal_mode:
+            # Expand decoder_embedding and lm_head for microtonal vocab
+            expanded_state_dict = expand_vocab_with_interpolation(
+                new_state_dict, llama_config, tokenizer
+            )
+            print(f"Vocab expanded: {len(new_state_dict)} keys, decoder_embedding {new_state_dict['decoder_embedding.weight'].shape} -> {expanded_state_dict['decoder_embedding.weight'].shape}")
+        else:
+            expanded_state_dict = new_state_dict
+            print("Microtonal mode disabled: using western vocab only (no expansion/interpolation).")
 
         # Load the state_dict into the model, ignoring unmatched keys
         missing_keys, unexpected_keys = model.load_state_dict(expanded_state_dict, strict=False)
         print(f"when loading checkpoint, encounter missing keys: {missing_keys}; unexpected_keys:{unexpected_keys}")
+
+        if adapter_dir_to_merge is not None:
+            model = PeftModel.from_pretrained(model, adapter_dir_to_merge, is_trainable=False)
+            model = model.merge_and_unload()
+            print(f"Merged adapter checkpoint from: {adapter_dir_to_merge}")
 
     if train_config.use_wandb:
         if not train_config.enable_fsdp or rank==0:
@@ -194,7 +258,7 @@ def main(**kwargs):
     #              (rows pitch_offset..pitch_offset+11 in decoder_embedding/lm_head) from drifting
     #   L_smooth — encourages adjacent cent-resolution pitch bins to have similar embeddings
     microtonal_reg = None
-    if getattr(llama_config, 'microtonal', False):
+    if use_microtonal_mode:
         # Direct references to the Parameter tensors — these survive PEFT/DDP wrapping
         # because wrappers delegate to the same underlying nn.Parameter objects.
         decoder_emb_weight = model.decoder_embedding.weight
@@ -239,12 +303,14 @@ def main(**kwargs):
             'frozen_lm_head': frozen_lm_head,
             'micro_pair_ids_left': torch.tensor(left_ids, dtype=torch.long),
             'micro_pair_ids_right': torch.tensor(right_ids, dtype=torch.long),
-            'lambda_anchor': 0.5,   # recommended range: [0.1, 1.0]
-            'lambda_smooth': 0.05,  # recommended range: [0.01, 0.1]
+                        'lambda_anchor': float(train_config.micro_lambda_anchor),
+                        'lambda_smooth': float(train_config.micro_lambda_smooth),
             'original_decode_vocab': original_decode_vocab,
         }
         print(f"Microtonal regularization: {len(western_ids)} western anchors, "
-              f"{len(left_ids)} adjacent-bin pairs for smoothness")
+                            f"{len(left_ids)} adjacent-bin pairs for smoothness, "
+                            f"lambda_anchor={microtonal_reg['lambda_anchor']}, "
+                            f"lambda_smooth={microtonal_reg['lambda_smooth']}")
 
     # Prepare the model for int8 training if quantization is enabled
     if train_config.quantization:
@@ -263,7 +329,7 @@ def main(**kwargs):
         # For microtonal CPT, decoder_embedding and lm_head must be fully trained
         # (not LoRA-wrapped) because they contain new vocab rows that need to learn
         # from scratch. Remove them from LoRA targets to avoid double-training
-        if getattr(llama_config, 'microtonal', False):
+        if use_microtonal_mode:
             attention_only = ["q_proj", "v_proj", "k_proj", "o_proj"]
             peft_config.target_modules = attention_only
             print(f"Microtonal CPT: LoRA target_modules overridden to {attention_only}")
@@ -272,13 +338,31 @@ def main(**kwargs):
         if wandb_run:
             wandb_run.config.update(peft_config)
 
-    # When using PEFT, non-LoRA params are frozen by default. For microtonal CPT we need
-    # the GRU decoder head (decoder_embedding, lm_head, GRU layers) to remain trainable
-    # so the model can learn the expanded pitch vocabulary.
-    if getattr(llama_config, 'microtonal', False):
-        for name, param in model.named_parameters():
-            if any(k in name for k in ['decoder_embedding', 'lm_head', 'decoder.']):
-                param.requires_grad = True
+    # In microtonal mode, default to pitch-focused tuning only:
+    # - pitch_embedding (FME pitch encoder)
+    # - decoder_embedding and lm_head (expanded vocab rows)
+    # - decoder.* (GRU decoder head)
+    # This avoids unintentionally training the full backbone in non-PEFT runs.
+    if use_microtonal_mode:
+        pitch_allowlist = ['pitch_embedding', 'decoder_embedding', 'lm_head', 'decoder.']
+        if getattr(train_config, 'micro_train_pitch_only', True):
+            trainable_count = 0
+            for name, param in model.named_parameters():
+                keep_trainable = any(k in name for k in pitch_allowlist)
+                # If LoRA is enabled, keep LoRA adapter params trainable too.
+                if train_config.use_peft and 'lora_' in name:
+                    keep_trainable = True
+                param.requires_grad = keep_trainable
+                if keep_trainable:
+                    trainable_count += 1
+            print(
+                "Microtonal CPT trainable policy: pitch-only allowlist "
+                f"{pitch_allowlist}, trainable_tensors={trainable_count}"
+            )
+        else:
+            for name, param in model.named_parameters():
+                if any(k in name for k in ['decoder_embedding', 'lm_head', 'decoder.']):
+                    param.requires_grad = True
 
     hsdp_device_mesh = None 
     if fsdp_config.hsdp and fsdp_config.sharding_strategy == ShardingStrategy.HYBRID_SHARD:
@@ -394,11 +478,12 @@ def main(**kwargs):
             n_micro = len(dataset_train)
             n_western = len(western_train_packed)
             alpha = train_config.mixing_alpha
-            # Weights sum to 1.0; each micro chunk gets alpha/n_micro,
-            # each western chunk gets (1-alpha)/n_western
+            # mixing_alpha is western replay fraction. Weights sum to 1.0;
+            # each micro chunk gets (1-alpha)/n_micro, each western chunk
+            # gets alpha/n_western.
             mixing_weights = (
-                [alpha / n_micro] * n_micro
-                + [(1.0 - alpha) / n_western] * n_western
+                [(1.0 - alpha) / n_micro] * n_micro
+                + [alpha / n_western] * n_western
             )
             dataset_train = torch.utils.data.ConcatDataset(
                 [dataset_train, western_train_packed]
@@ -508,10 +593,19 @@ def main(**kwargs):
         if confusion_request is not None:
             eval_ppl, eval_epoch_loss, _, _, conf_summary = eval_out
             if not train_config.enable_fsdp or rank == 0:
+                diag = conf_summary.get('diagnostics', {})
                 print(
                     f"Validation-only confusion summary: total_pitch_samples={conf_summary.get('total_pitch_samples', 0)}, "
                     f"ignored_pred_non_pitch={conf_summary.get('ignored_pred_non_pitch', 0)}"
                 )
+                if diag:
+                    print(
+                        "Validation-only pitch diagnostics: "
+                        f"micro_recall={diag.get('micro_recall', 0.0):.4f}, "
+                        f"micro_precision={diag.get('micro_precision', 0.0):.4f}, "
+                        f"pred_western14_ratio={diag.get('pred_western14_ratio', 0.0):.4f}, "
+                        f"micro_to_western14_leak_rate={diag.get('micro_to_western14_leak_rate', 0.0):.4f}"
+                    )
                 print(f"Artifacts: {conf_summary.get('artifacts', {})}")
         else:
             eval_ppl, eval_epoch_loss, _, _ = eval_out
@@ -529,13 +623,14 @@ def main(**kwargs):
     # western rows begin adapting.
     if microtonal_reg is not None:
         total_steps = train_config.num_epochs * len(train_dataloader)
-        microtonal_reg['warmup_freeze_steps'] = int(0.10 * total_steps)
+        warmup_ratio = max(0.0, min(1.0, float(train_config.micro_warmup_freeze_ratio)))
+        microtonal_reg['warmup_freeze_steps'] = int(warmup_ratio * total_steps)
 
     # Initialize the optimizer with per-component learning rate groups.
     # LoRA adapters and GRU decoder components have separate LR groups so they can be
     # tuned independently. All groups use the same base LR by default; differentiation
     # between pretrained and new vocab rows is handled by the gradient scaling hook below
-    if getattr(llama_config, 'microtonal', False):
+    if use_microtonal_mode:
         lora_params, decoder_head_params, gru_params = [], [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
@@ -563,7 +658,7 @@ def main(**kwargs):
         # the interpolation initialization being far from optimal, while pretrained rows
         # start near-optimal and are additionally stabilized by L_anchor.
         original_decode_vocab = tokenizer.original_decode_vocab
-        scale_factor = 3.0
+        scale_factor = float(train_config.micro_new_row_lr_scale)
         def _make_row_scaling_hook(boundary, factor):
             def hook(grad):
                 scaled = grad.clone()
