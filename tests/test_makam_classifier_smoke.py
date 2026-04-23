@@ -3,7 +3,10 @@ import os
 
 import pytest
 import torch
-from transformers import LlamaConfig, LlamaForSequenceClassification
+from llama_recipes.transformers_minimal.src.transformers.models.llama.modeling_llama import (
+    LlamaConfig,
+    LlamaForSequenceClassification,
+)
 
 from llama_recipes.datasets.music_tokenizer import MusicTokenizer
 from llama_recipes.datasets.symbtr_dataset_eval import MakamClassificationDataset
@@ -32,8 +35,8 @@ def _load_tokenizer_config(model_config_path):
 @pytest.mark.slow
 def test_one_batch_sequence_classifier_smoke_from_label_map():
     model_cfg = "src/llama_recipes/configs/config_micro/model_config_microtonal.json"
-    csv_path = "data/processed_data_symbtr/makam_classification_split.csv"
-    label_map_path = "data/processed_data_symbtr/makam_label_map.json"
+    csv_path = "data_eval/symbtr4eval/train_test_split.csv"
+    label_map_path = "data_eval/symbtr4eval/makam_label_map.json"
 
     required_paths = [model_cfg, csv_path, label_map_path]
     missing = [p for p in required_paths if not os.path.exists(p)]
@@ -52,8 +55,9 @@ def test_one_batch_sequence_classifier_smoke_from_label_map():
         "DatasetConfig",
         (),
         {
-            "data_dir": "data/processed_data_symbtr",
+            "data_dir": "data_eval/symbtr4eval",
             "csv_file": csv_path,
+            "label_map": label_map_path,
             "seq_len": 64,
         },
     )()
@@ -63,29 +67,26 @@ def test_one_batch_sequence_classifier_smoke_from_label_map():
         pytest.skip("No rows in train split for makam classification dataset")
 
     sample = ds[0]
-    compound_ids = sample["input_ids"]  # [seq, 6], can include negative special values
+    compound_ids = sample["input_ids"].unsqueeze(0)  # [1, seq, 6]
 
-    # LlamaForSequenceClassification expects token IDs [batch, seq] in [0, vocab_size).
-    # Build a deterministic pseudo-token stream from the compound representation.
-    pseudo_ids = (compound_ids + 3).clamp(min=0).reshape(1, -1)
-    vocab_size = int(pseudo_ids.max().item()) + 32
-
-    config = LlamaConfig(
-        vocab_size=vocab_size,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        max_position_embeddings=max(512, pseudo_ids.shape[1] + 8),
-        num_labels=num_labels,
-        pad_token_id=0,
-    )
+    # Load full config schema used by training (contains compound embedding fields),
+    # then shrink dimensions for an inexpensive smoke forward pass.
+    config = LlamaConfig.from_pretrained(model_cfg)
+    config.hidden_size = 60
+    config.intermediate_size = 120
+    config.num_hidden_layers = 2
+    config.num_attention_heads = 6
+    config.num_key_value_heads = 6
+    config.max_position_embeddings = max(512, compound_ids.shape[1] + 8)
+    config.num_labels = num_labels
+    config.pad_token_id = int(tokenizer.pad_token)
+    config.problem_type = "single_label_classification"
 
     model = LlamaForSequenceClassification(config)
     model.eval()
+    attention_mask = torch.ones((1, compound_ids.shape[1]), dtype=torch.long)
 
     with torch.no_grad():
-        outputs = model(input_ids=pseudo_ids)
+        outputs = model(input_ids=compound_ids, attention_mask=attention_mask)
 
     assert outputs.logits.shape == (1, num_labels)

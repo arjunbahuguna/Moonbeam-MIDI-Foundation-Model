@@ -1,0 +1,7 @@
+Failed to process data_eval/symbtr4eval/processed/beyati--agirsemai--agir_aksaksemai--didi_ci_kerdi--yahya_nazim_celebi.npy:
+data_eval/symbtr4eval/processed/beyati--agirsemai--agir_aksaksemai--didi_ci_kerdi--yahya_nazim_celebi.npy contains large onsets: True, large durations: False
+Largest onset: 1235
+Failed to process data_eval/symbtr4eval/processed/muhayyerkurdi--sarki--aksak--bilmem_ki--rakim_elkutlu.npy:
+data_eval/symbtr4eval/processed/muhayyerkurdi--sarki--aksak--bilmem_ki--rakim_elkutlu.npy contains large onsets: True, large durations: True
+Largest onset: 1443
+Largest duration: 1370

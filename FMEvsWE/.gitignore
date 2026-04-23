@@ -1,0 +1,40 @@
+__pycache__/
+src/llama_recipes/configs/__pycache__/
+src/llama_recipes/datasets/grammar_dataset/__pycache__/
+src/llama_recipes/model_checkpointing/__pycache__/
+src/llama_recipes/utils/__pycache__/
+tests/__pycache__/
+src/llama_recipes/datasets/__pycache__/
+src/llama_recipes/model/modeling_musicllama.py
+src/llama_recipes/transformers_minimal/build/*
+src/llama_recipes/transformers_minimal/src/transformers.egg-info/SOURCES.txt
+src/llama_recipes/transformers_minimal/src/transformers/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers/integrations/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers/models/llama/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers/utils/__pycache__/
+recipes/inference/custom_music_generation/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers/generation/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers/models/encoder_decoder/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers/quantizers/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers/models/auto/__pycache__/
+src/llama_recipes/transformers_minimal/src/transformers.egg-info/
+
+# Data, models, and other generated files
+data/
+data_processed/
+checkpoints/
+processed_data/
+_validate_a2.py
+plans/
+val_file.py
+models/
+processed_datasets/
+wandb/
+
+# Python
+.venv/
+
+# HPC
+*.sh
+*.err
+*.out

@@ -3,12 +3,25 @@ import json
 import os
 
 
+def _resolve_makam_name(row):
+    makam_value = row.get("makam", None)
+    if pd.notna(makam_value):
+        makam_name = str(makam_value).strip()
+        if makam_name:
+            return makam_name
+
+    stem = os.path.splitext(str(row.get("file_base_name", "")))[0]
+    if "--" in stem:
+        return stem.split("--", 1)[0].strip()
+    return ""
+
+
 def main():
     # Configuration
-    CSV_FILE = "data/processed_data_symbtr/train_test_split.csv"
+    CSV_FILE = "data_eval/symbtr4eval/train_test_split.csv"
     MIN_TRAIN_PIECES = 10
-    OUTPUT_CSV = "data/processed_data_symbtr/makam_classification_split.csv"
-    OUTPUT_LABEL_MAP = "data/processed_data_symbtr/makam_label_map.json"
+    OUTPUT_CSV = "data_eval/symbtr4eval/makam_classification_split.csv"
+    OUTPUT_LABEL_MAP = "data_eval/symbtr4eval/makam_label_map.json"
 
     print("Processing data...")
 
@@ -20,6 +33,14 @@ def main():
     # 2. Load data
     df = pd.read_csv(CSV_FILE)
     print(f"Loaded {len(df)} records.")
+
+    # Resolve missing makam entries from filename prefix when possible.
+    df["makam"] = df.apply(_resolve_makam_name, axis=1)
+    unresolved_mask = df["makam"].astype(str).str.strip() == ""
+    if unresolved_mask.any():
+        unresolved_count = int(unresolved_mask.sum())
+        print(f"Warning: dropping {unresolved_count} rows with unresolved makam names.")
+        df = df.loc[~unresolved_mask].copy()
 
     # 3. Calculate Makam frequency in training set
     train_df = df[df['split'] == 'train']

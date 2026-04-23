@@ -2,13 +2,14 @@ import json
 import os
 import random
 import re
+from datetime import datetime
 from dataclasses import asdict
 
 import fire
 import torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_recall_fscore_support, confusion_matrix
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 
 from llama_recipes.configs import train_config as TRAIN_CONFIG
@@ -241,6 +242,152 @@ def _create_optimizer(model, train_cfg, device):
     return adamw, "adamw"
 
 
+def _setup_wandb(train_cfg, makam_cfg, model_config, dataset_config, kwargs):
+    if not bool(train_cfg.use_wandb):
+        return None
+
+    try:
+        import wandb
+    except ImportError:
+        print(
+            "WARNING: use_wandb=True but wandb is not installed. "
+            "Continuing without wandb logging."
+        )
+        return None
+
+    from llama_recipes.configs import wandb_config as WANDB_CONFIG
+
+    wandb_cfg = WANDB_CONFIG()
+    update_config(wandb_cfg, **kwargs)
+    init_dict = asdict(wandb_cfg)
+
+    try:
+        run = wandb.init(**init_dict)
+    except Exception as exc:
+        print(
+            "WARNING: Failed to initialize wandb run. "
+            f"Continuing without wandb logging. Error: {exc}"
+        )
+        return None
+
+    run.config.update(asdict(train_cfg), allow_val_change=True)
+    run.config.update(asdict(makam_cfg), allow_val_change=True)
+    run.config.update(model_config.to_dict(), allow_val_change=True)
+
+    if hasattr(dataset_config, "__dataclass_fields__"):
+        run.config.update(asdict(dataset_config), allow_val_change=True)
+
+    return run
+
+
+def _wandb_log(run, payload, step=None):
+    if run is None:
+        return
+    if step is None:
+        run.log(payload)
+    else:
+        run.log(payload, step=step)
+
+
+def _save_metrics_and_plots(train_cfg, metrics_payload):
+    if not bool(train_cfg.save_metrics):
+        return None, []
+
+    os.makedirs(train_cfg.output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    metrics_path = os.path.join(
+        train_cfg.output_dir,
+        f"metrics_data_{train_cfg.model_name}-{timestamp}.json",
+    )
+
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics_payload, f, indent=2, ensure_ascii=False)
+
+    plot_paths = []
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(
+            "WARNING: Could not import matplotlib for metric plots. "
+            f"Saved metrics JSON only. Error: {exc}"
+        )
+        return metrics_path, plot_paths
+
+    history = metrics_payload.get("history", {})
+    train_loss_by_epoch = history.get("train_loss_by_epoch", [])
+    if train_loss_by_epoch:
+        epochs = [item["epoch"] for item in train_loss_by_epoch]
+        losses = [item["train_loss"] for item in train_loss_by_epoch]
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(epochs, losses, marker="o")
+        ax.set_title("Train Loss by Epoch")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.grid(True, alpha=0.3)
+        train_plot = os.path.join(
+            train_cfg.output_dir,
+            f"plot_train_loss_{train_cfg.model_name}-{timestamp}.png",
+        )
+        fig.tight_layout()
+        fig.savefig(train_plot, dpi=160)
+        plt.close(fig)
+        plot_paths.append(train_plot)
+
+    eval_by_epoch = history.get("eval_by_epoch", [])
+    if eval_by_epoch:
+        epochs = [item["epoch"] for item in eval_by_epoch]
+        eval_loss = [item["eval_loss"] for item in eval_by_epoch]
+        eval_acc = [item["eval_accuracy"] for item in eval_by_epoch]
+        eval_f1 = [item["eval_macro_f1"] for item in eval_by_epoch]
+
+        fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+        axes[0].plot(epochs, eval_loss, marker="o")
+        axes[0].set_ylabel("Eval Loss")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(epochs, eval_acc, marker="o")
+        axes[1].set_ylabel("Eval Accuracy")
+        axes[1].grid(True, alpha=0.3)
+
+        axes[2].plot(epochs, eval_f1, marker="o")
+        axes[2].set_ylabel("Eval Macro-F1")
+        axes[2].set_xlabel("Epoch")
+        axes[2].grid(True, alpha=0.3)
+
+        eval_plot = os.path.join(
+            train_cfg.output_dir,
+            f"plot_eval_epoch_metrics_{train_cfg.model_name}-{timestamp}.png",
+        )
+        fig.tight_layout()
+        fig.savefig(eval_plot, dpi=160)
+        plt.close(fig)
+        plot_paths.append(eval_plot)
+
+    eval_by_step = history.get("eval_by_step", [])
+    if eval_by_step:
+        steps = [item["global_step"] for item in eval_by_step]
+        eval_f1 = [item["eval_macro_f1"] for item in eval_by_step]
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(steps, eval_f1, marker="o")
+        ax.set_title("Eval Macro-F1 by Validation Step")
+        ax.set_xlabel("Global Step")
+        ax.set_ylabel("Eval Macro-F1")
+        ax.grid(True, alpha=0.3)
+        step_plot = os.path.join(
+            train_cfg.output_dir,
+            f"plot_eval_f1_steps_{train_cfg.model_name}-{timestamp}.png",
+        )
+        fig.tight_layout()
+        fig.savefig(step_plot, dpi=160)
+        plt.close(fig)
+        plot_paths.append(step_plot)
+
+    return metrics_path, plot_paths
+
+
 def evaluate_classification(model, dataloader, device):
     model.eval()
     total_loss = 0.0
@@ -269,10 +416,37 @@ def evaluate_classification(model, dataloader, device):
     accuracy = correct / max(1, len(all_targets))
     macro_f1 = f1_score(all_targets, all_preds, average="macro", zero_division=0)
 
+    labels = sorted(set(all_targets) | set(all_preds))
+    precision, recall, f1, support = precision_recall_fscore_support(
+        all_targets,
+        all_preds,
+        labels=labels,
+        average=None,
+        zero_division=0,
+    )
+    conf = confusion_matrix(all_targets, all_preds, labels=labels)
+
+    per_class_metrics = {}
+    for idx, label in enumerate(labels):
+        row_total = int(conf[idx].sum())
+        class_acc = float(conf[idx, idx] / row_total) if row_total > 0 else 0.0
+        per_class_metrics[str(label)] = {
+            "accuracy": class_acc,
+            "precision": float(precision[idx]),
+            "recall": float(recall[idx]),
+            "f1": float(f1[idx]),
+            "support": int(support[idx]),
+        }
+
     return {
         "eval_loss": eval_loss,
         "eval_accuracy": accuracy,
         "eval_macro_f1": float(macro_f1),
+        "per_class_metrics": per_class_metrics,
+        "confusion_matrix": conf.tolist(),
+        "labels": [int(x) for x in labels],
+        "predictions": [int(x) for x in all_preds],
+        "targets": [int(x) for x in all_targets],
     }
 
 
@@ -284,12 +458,19 @@ def train_classification(
     scheduler,
     train_cfg,
     device,
+    wandb_run=None,
+    label_map=None,
 ):
     model.train()
     global_step = 0
     best_macro_f1 = float("-inf")
     best_metrics = None
     running_train_losses = []
+    history = {
+        "train_loss_by_epoch": [],
+        "eval_by_step": [],
+        "eval_by_epoch": [],
+    }
     grad_acc_steps = max(1, int(train_cfg.gradient_accumulation_steps))
 
     if train_cfg.save_model:
@@ -339,6 +520,69 @@ def train_classification(
                     f"eval_macro_f1={metrics['eval_macro_f1']:.6f}"
                 )
 
+                class_names = []
+                for label_id in metrics["labels"]:
+                    if isinstance(label_map, dict):
+                        class_names.append(str(label_map.get(str(label_id), label_id)))
+                    else:
+                        class_names.append(str(label_id))
+
+                per_class_wandb = {}
+                for label_id, class_metric in metrics["per_class_metrics"].items():
+                    class_name = label_id
+                    if isinstance(label_map, dict):
+                        class_name = str(label_map.get(str(label_id), label_id))
+                    safe_name = class_name.replace("/", "_")
+                    per_class_wandb[f"eval/class_accuracy_step/{safe_name}"] = float(
+                        class_metric["accuracy"]
+                    )
+                    per_class_wandb[f"eval/class_f1_step/{safe_name}"] = float(
+                        class_metric["f1"]
+                    )
+
+                history["eval_by_step"].append(
+                    {
+                        "epoch": int(epoch),
+                        "global_step": int(global_step),
+                        "eval_loss": float(metrics["eval_loss"]),
+                        "eval_accuracy": float(metrics["eval_accuracy"]),
+                        "eval_macro_f1": float(metrics["eval_macro_f1"]),
+                        "per_class_metrics": metrics["per_class_metrics"],
+                        "confusion_matrix": metrics["confusion_matrix"],
+                        "labels": metrics["labels"],
+                    }
+                )
+                wandb_payload = {
+                    "eval/loss_step": float(metrics["eval_loss"]),
+                    "eval/accuracy_step": float(metrics["eval_accuracy"]),
+                    "eval/macro_f1_step": float(metrics["eval_macro_f1"]),
+                    "train/epoch": int(epoch),
+                }
+                wandb_payload.update(per_class_wandb)
+                _wandb_log(wandb_run, wandb_payload, step=global_step)
+
+                if wandb_run is not None:
+                    try:
+                        import wandb
+
+                        _wandb_log(
+                            wandb_run,
+                            {
+                                "eval/confusion_matrix_step": wandb.plot.confusion_matrix(
+                                    probs=None,
+                                    y_true=metrics["targets"],
+                                    preds=metrics["predictions"],
+                                    class_names=class_names,
+                                )
+                            },
+                            step=global_step,
+                        )
+                    except Exception as exc:
+                        print(
+                            "WARNING: Failed to log step confusion matrix to wandb. "
+                            f"Error: {exc}"
+                        )
+
                 if metrics["eval_macro_f1"] > best_macro_f1:
                     best_macro_f1 = metrics["eval_macro_f1"]
                     best_metrics = metrics
@@ -368,6 +612,18 @@ def train_classification(
             scheduler.step()
             epoch_train_loss = epoch_loss_sum / max(1, epoch_steps)
             running_train_losses.append(epoch_train_loss)
+            history["train_loss_by_epoch"].append(
+                {"epoch": int(epoch), "train_loss": float(epoch_train_loss)}
+            )
+            _wandb_log(
+                wandb_run,
+                {
+                    "train/loss_epoch": float(epoch_train_loss),
+                    "train/lr": float(optimizer.param_groups[0]["lr"]),
+                    "train/epoch": int(epoch),
+                },
+                step=global_step,
+            )
             print(f"epoch={epoch} train_loss={epoch_train_loss:.6f}")
             print(f"Reached max_train_step={train_cfg.max_train_step}; stopping early.")
             break
@@ -375,6 +631,18 @@ def train_classification(
         scheduler.step()
         epoch_train_loss = epoch_loss_sum / max(1, epoch_steps)
         running_train_losses.append(epoch_train_loss)
+        history["train_loss_by_epoch"].append(
+            {"epoch": int(epoch), "train_loss": float(epoch_train_loss)}
+        )
+        _wandb_log(
+            wandb_run,
+            {
+                "train/loss_epoch": float(epoch_train_loss),
+                "train/lr": float(optimizer.param_groups[0]["lr"]),
+                "train/epoch": int(epoch),
+            },
+            step=global_step,
+        )
         print(f"epoch={epoch} train_loss={epoch_train_loss:.6f}")
 
         if train_cfg.run_validation and eval_dataloader is not None:
@@ -385,6 +653,69 @@ def train_classification(
                 f"eval_accuracy={metrics['eval_accuracy']:.6f} "
                 f"eval_macro_f1={metrics['eval_macro_f1']:.6f}"
             )
+
+            class_names = []
+            for label_id in metrics["labels"]:
+                if isinstance(label_map, dict):
+                    class_names.append(str(label_map.get(str(label_id), label_id)))
+                else:
+                    class_names.append(str(label_id))
+
+            per_class_wandb = {}
+            for label_id, class_metric in metrics["per_class_metrics"].items():
+                class_name = label_id
+                if isinstance(label_map, dict):
+                    class_name = str(label_map.get(str(label_id), label_id))
+                safe_name = class_name.replace("/", "_")
+                per_class_wandb[f"eval/class_accuracy_epoch/{safe_name}"] = float(
+                    class_metric["accuracy"]
+                )
+                per_class_wandb[f"eval/class_f1_epoch/{safe_name}"] = float(
+                    class_metric["f1"]
+                )
+
+            history["eval_by_epoch"].append(
+                {
+                    "epoch": int(epoch),
+                    "global_step": int(global_step),
+                    "eval_loss": float(metrics["eval_loss"]),
+                    "eval_accuracy": float(metrics["eval_accuracy"]),
+                    "eval_macro_f1": float(metrics["eval_macro_f1"]),
+                    "per_class_metrics": metrics["per_class_metrics"],
+                    "confusion_matrix": metrics["confusion_matrix"],
+                    "labels": metrics["labels"],
+                }
+            )
+            wandb_payload = {
+                "eval/loss_epoch": float(metrics["eval_loss"]),
+                "eval/accuracy_epoch": float(metrics["eval_accuracy"]),
+                "eval/macro_f1_epoch": float(metrics["eval_macro_f1"]),
+                "train/epoch": int(epoch),
+            }
+            wandb_payload.update(per_class_wandb)
+            _wandb_log(wandb_run, wandb_payload, step=global_step)
+
+            if wandb_run is not None:
+                try:
+                    import wandb
+
+                    _wandb_log(
+                        wandb_run,
+                        {
+                            "eval/confusion_matrix_epoch": wandb.plot.confusion_matrix(
+                                probs=None,
+                                y_true=metrics["targets"],
+                                preds=metrics["predictions"],
+                                class_names=class_names,
+                            )
+                        },
+                        step=global_step,
+                    )
+                except Exception as exc:
+                    print(
+                        "WARNING: Failed to log epoch confusion matrix to wandb. "
+                        f"Error: {exc}"
+                    )
             if metrics["eval_macro_f1"] > best_macro_f1:
                 best_macro_f1 = metrics["eval_macro_f1"]
                 best_metrics = metrics
@@ -415,7 +746,7 @@ def train_classification(
         ),
         "total_steps": global_step,
     }
-    return results
+    return results, history
 
 
 def main(**kwargs):
@@ -496,8 +827,19 @@ def main(**kwargs):
     print(f"label_map_path={label_map_path}")
     print(f"num_labels={num_labels}")
 
+    wandb_run = _setup_wandb(
+        train_cfg=train_cfg,
+        makam_cfg=makam_cfg,
+        model_config=model_config,
+        dataset_config=dataset_config,
+        kwargs=kwargs,
+    )
+
     # LoRA adapter configuration
-    if bool(train_cfg.enable_lora):
+    enable_lora = bool(train_cfg.enable_lora) or (
+        bool(train_cfg.use_peft) and str(train_cfg.peft_method).lower() == "lora"
+    )
+    if enable_lora:
         lora_config = LoraConfig(
             task_type=TaskType.SEQ_CLS,
             inference_mode=False,
@@ -512,6 +854,11 @@ def main(**kwargs):
             f"LoRA enabled: r={train_cfg.lora_r}, alpha={train_cfg.lora_alpha}, dropout={train_cfg.lora_dropout}"
         )
         model.print_trainable_parameters()
+    elif bool(train_cfg.use_peft):
+        print(
+            "WARNING: use_peft=True but only LoRA is currently implemented in this entrypoint. "
+            "Set --enable_lora true or --peft_method lora."
+        )
 
     ds_train = get_preprocessed_dataset(tokenizer, dataset_config, split="train")
     ds_val = get_preprocessed_dataset(tokenizer, dataset_config, split="test")
@@ -552,7 +899,7 @@ def main(**kwargs):
     print(f"Using optimizer: {optimizer_name}")
     scheduler = StepLR(optimizer, step_size=1, gamma=train_cfg.gamma)
 
-    results = train_classification(
+    results, history = train_classification(
         model=model,
         train_dataloader=train_dataloader,
         eval_dataloader=eval_dataloader if train_cfg.run_validation else None,
@@ -560,7 +907,46 @@ def main(**kwargs):
         scheduler=scheduler,
         train_cfg=train_cfg,
         device=device,
+        wandb_run=wandb_run,
+        label_map=label_map,
     )
+
+    metrics_payload = {
+        "results": results,
+        "history": history,
+        "train_config": asdict(train_cfg),
+        "makam_config": asdict(makam_cfg),
+        "label_map_path": label_map_path,
+        "num_labels": num_labels,
+    }
+
+    metrics_path, plot_paths = _save_metrics_and_plots(train_cfg, metrics_payload)
+    if metrics_path is not None:
+        print(f"Saved metrics JSON to {metrics_path}")
+    if plot_paths:
+        print(f"Saved metric plots to: {plot_paths}")
+
+    if wandb_run is not None:
+        summary_payload = {
+            "summary/avg_train_loss": float(results["avg_train_loss"]),
+            "summary/total_steps": int(results["total_steps"]),
+        }
+        if results["best_eval_macro_f1"] is not None:
+            summary_payload["summary/best_eval_macro_f1"] = float(
+                results["best_eval_macro_f1"]
+            )
+            summary_payload["summary/best_eval_accuracy"] = float(
+                results["best_eval_accuracy"]
+            )
+            summary_payload["summary/best_eval_loss"] = float(
+                results["best_eval_loss"]
+            )
+        _wandb_log(wandb_run, summary_payload, step=int(results["total_steps"]))
+        if metrics_path is not None:
+            wandb_run.summary["metrics_json_path"] = metrics_path
+        if plot_paths:
+            wandb_run.summary["metrics_plot_paths"] = plot_paths
+        wandb_run.finish()
 
     for key, value in results.items():
         print(f"Key: {key}, Value: {value}")

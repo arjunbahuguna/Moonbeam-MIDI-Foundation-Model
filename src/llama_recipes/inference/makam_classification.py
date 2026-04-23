@@ -89,7 +89,7 @@ def main(
     checkpoint_path: str,
     npy_path: str,
     model_config_path: str = "src/llama_recipes/configs/config_micro/model_config_microtonal.json",
-    label_map_path: str = "data/processed_data_symbtr/makam_label_map.json",
+    label_map_path: str = "data_eval/symbtr4eval/makam_label_map.json",
     seq_len: int = 1200,
     window_stride: int = 600,
     aggregation: str = "mean",

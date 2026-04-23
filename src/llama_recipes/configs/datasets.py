@@ -90,8 +90,9 @@ class symbtr_dataset_eval:
     dataset: str = "symbtr_dataset_eval"
     train_split: str = "train"
     test_split: str = "test"
-    data_dir: str = "data/processed_data_symbtr"
-    csv_file: str = "data/processed_data_symbtr/makam_classification_split.csv"
-    label_map: str = "data/processed_data_symbtr/makam_label_map.json"
+    data_dir: str = "data_eval/symbtr4eval"
+    csv_file: str = "data_eval/symbtr4eval/train_test_split.csv"
+    label_map: str = "data_eval/symbtr4eval/makam_label_map.json"
     seq_len: int = 1200
+
     

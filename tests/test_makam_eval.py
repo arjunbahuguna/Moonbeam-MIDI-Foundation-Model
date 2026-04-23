@@ -1,9 +1,24 @@
 import pandas as pd
 import pytest
 import os
+import json
 
 # Configuration for the real data file
-REAL_CSV_PATH = "data/processed_data_symbtr/makam_classification_split.csv"
+REAL_CSV_PATH = "data_eval/symbtr4eval/train_test_split.csv"
+REAL_LABEL_MAP_PATH = "data_eval/symbtr4eval/makam_label_map.json"
+
+
+def _resolve_makam_name(row):
+    makam_value = row.get("makam", None)
+    if pd.notna(makam_value):
+        makam_name = str(makam_value).strip()
+        if makam_name:
+            return makam_name
+
+    stem = os.path.splitext(str(row.get("file_base_name", "")))[0]
+    if "--" in stem:
+        return stem.split("--", 1)[0].strip()
+    return ""
 
 @pytest.fixture
 def mock_classification_data():
@@ -63,15 +78,31 @@ def test_real_data_validation():
     """
     if not os.path.exists(REAL_CSV_PATH):
         pytest.skip(f"Real data file not found, skipping integration test: {REAL_CSV_PATH}")
+    if not os.path.exists(REAL_LABEL_MAP_PATH):
+        pytest.skip(
+            f"Label map file not found, skipping integration test: {REAL_LABEL_MAP_PATH}"
+        )
 
     df = pd.read_csv(REAL_CSV_PATH)
+    with open(REAL_LABEL_MAP_PATH, "r", encoding="utf-8") as f:
+        label_map = json.load(f)
 
-    # Assertion 1: Each makam must have at least 10 samples
+    df["makam"] = df.apply(_resolve_makam_name, axis=1)
+    unresolved_mask = df["makam"].astype(str).str.strip() == ""
+    assert not unresolved_mask.any(), "Found rows with unresolved makam names."
+
+    df["label"] = df["makam"].map(label_map)
+
+    # Assertion 1: Label map must fully cover all makams present in data.
     makam_counts = df['makam'].value_counts()
-    assert (makam_counts >= 10).all(), f"Found makams with fewer than 10 samples:\\n{makam_counts[makam_counts < 10]}"
+    assert len(makam_counts) == len(label_map), (
+        f"Label-map/data class count mismatch: data={len(makam_counts)}, label_map={len(label_map)}"
+    )
 
     # Assertion 2: Must have both train and test splits
     assert set(df['split'].unique()) == {'train', 'test'}, "Dataset must contain both 'train' and 'test' splits."
+    split_counts = df['split'].value_counts()
+    assert (split_counts > 0).all(), f"Found empty split(s): {split_counts.to_dict()}"
 
     # Assertion 3: Labels must be non-null integers
     assert df['label'].notna().all(), "Found null values in the 'label' column."
