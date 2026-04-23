@@ -17,8 +17,8 @@ from llama_recipes.datasets import (
     get_emophia_con_gen_dataset,
     get_commu_con_gen_dataset,
     get_selected_symbtr_dataset,
-    get_symbtr_dataset_eval
-
+    get_symbtr_dataset_eval,
+    get_player_classification_dataset,
 )
 
 
@@ -47,13 +47,17 @@ def get_custom_dataset(dataset_config, tokenizer, split: str):
 
     module_path = Path(module_path)
     if not module_path.is_file():
-        raise FileNotFoundError(f"Dataset py file {module_path.as_posix()} does not exist or is not a file.")
+        raise FileNotFoundError(
+            f"Dataset py file {module_path.as_posix()} does not exist or is not a file."
+        )
 
     module = load_module_from_py_file(module_path.as_posix())
     try:
         return getattr(module, func_name)(dataset_config, tokenizer, split)
     except AttributeError as e:
-        print(f"It seems like the given method name ({func_name}) is not present in the dataset .py file ({module_path.as_posix()}).")
+        print(
+            f"It seems like the given method name ({func_name}) is not present in the dataset .py file ({module_path.as_posix()})."
+        )
         raise e
 
 
@@ -68,7 +72,8 @@ DATASET_PREPROC = {
     "emophia_con_gen_dataset": get_emophia_con_gen_dataset,
     "commu_con_gen_dataset": get_commu_con_gen_dataset,
     "selected_symbtr_dataset": get_selected_symbtr_dataset,
-    "symbtr_dataset_eval" : get_symbtr_dataset_eval
+    "symbtr_dataset_eval": get_symbtr_dataset_eval,
+    "player_classification_dataset": get_player_classification_dataset,
 }
 
 

@@ -77,3 +77,8 @@ class ConcatDataset_hybrid_padding_concatenating(Dataset):
     
     def __len__(self):
         return len(self.samples)
+
+
+# Backward-compatible aliases used by legacy training entrypoints.
+ConcatDataset_vanilla = ConcatDataset_hybrid_padding_concatenating
+ConcatDataset_dummy_padding = ConcatDataset_hybrid_padding_concatenating
