@@ -303,7 +303,115 @@ def _save_metrics_and_plots(train_cfg, metrics_payload):
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics_payload, f, indent=2, ensure_ascii=False)
 
-    plot_paths = []
+    # Keep only JSON metrics on disk here. Line plots are already available in wandb.
+    return metrics_path, []
+
+
+def _save_confusion_matrices_from_metrics_json(metrics_path):
+    """Render one compact confusion-matrix PNG per epoch from saved metrics JSON.
+
+    Output files are written next to metrics_path as:
+      epoch0_confusion.png ... epochN_confusion.png
+    """
+    if not metrics_path or not os.path.exists(metrics_path):
+        return []
+
+    with open(metrics_path, "r", encoding="utf-8") as f:
+        metrics_payload = json.load(f)
+
+    history = metrics_payload.get("history", {})
+    eval_by_epoch = history.get("eval_by_epoch", [])
+    if not eval_by_epoch:
+        return []
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:
+        print(
+            "WARNING: Could not import matplotlib/numpy for confusion matrix export. "
+            f"Error: {exc}"
+        )
+        return []
+
+    out_dir = os.path.dirname(metrics_path)
+    output_paths = []
+
+    for item in eval_by_epoch:
+        epoch = int(item.get("epoch", 0))
+        conf = item.get("confusion_matrix", [])
+        if not conf:
+            continue
+        labels = item.get("labels", list(range(len(conf))))
+
+        arr = np.array(conf, dtype=float)
+        fig, ax = plt.subplots(figsize=(7.2, 6.4))
+        im = ax.imshow(arr, interpolation="nearest", cmap="Blues", aspect="auto")
+        ax.set_title(f"Epoch {epoch} Confusion Matrix")
+        ax.set_xlabel("Predicted label index")
+        ax.set_ylabel("True label index")
+
+        if len(labels) <= 30:
+            tick_positions = list(range(len(labels)))
+            tick_labels = [str(x) for x in labels]
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels(tick_labels, rotation=90, fontsize=6)
+            ax.set_yticks(tick_positions)
+            ax.set_yticklabels(tick_labels, fontsize=6)
+        else:
+            # Keep plot compact and legible for many classes.
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=7)
+
+        out_path = os.path.join(out_dir, f"epoch{epoch}_confusion.png")
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=170)
+        plt.close(fig)
+        output_paths.append(out_path)
+
+    return output_paths
+
+
+def _save_distributional_distance_table_from_metrics_json(metrics_path):
+    """Save one PNG table with rows=epochs and cols=distributional distances."""
+    if not metrics_path or not os.path.exists(metrics_path):
+        return None
+
+    with open(metrics_path, "r", encoding="utf-8") as f:
+        metrics_payload = json.load(f)
+
+    history = metrics_payload.get("history", {})
+    eval_by_epoch = history.get("eval_by_epoch", [])
+    if not eval_by_epoch:
+        return None
+
+    rows = []
+    columns = [
+        "kl_divergence",
+        "cosine_similarity",
+        "total_variation",
+        "wasserstein_1",
+    ]
+
+    for item in sorted(eval_by_epoch, key=lambda x: int(x.get("epoch", 0))):
+        epoch = int(item.get("epoch", 0))
+        dist = item.get("distributional_distances", {}) or {}
+        rows.append(
+            [
+                str(epoch),
+                f"{float(dist.get('kl_divergence', float('nan'))):.6f}",
+                f"{float(dist.get('cosine_similarity', float('nan'))):.6f}",
+                f"{float(dist.get('total_variation', float('nan'))):.6f}",
+                f"{float(dist.get('wasserstein_1', float('nan'))):.6f}",
+            ]
+        )
+
     try:
         import matplotlib
 
@@ -311,81 +419,92 @@ def _save_metrics_and_plots(train_cfg, metrics_payload):
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(
-            "WARNING: Could not import matplotlib for metric plots. "
-            f"Saved metrics JSON only. Error: {exc}"
+            "WARNING: Could not import matplotlib for distribution table export. "
+            f"Error: {exc}"
         )
-        return metrics_path, plot_paths
+        return None
 
-    history = metrics_payload.get("history", {})
-    train_loss_by_epoch = history.get("train_loss_by_epoch", [])
-    if train_loss_by_epoch:
-        epochs = [item["epoch"] for item in train_loss_by_epoch]
-        losses = [item["train_loss"] for item in train_loss_by_epoch]
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(epochs, losses, marker="o")
-        ax.set_title("Train Loss by Epoch")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.grid(True, alpha=0.3)
-        train_plot = os.path.join(
-            train_cfg.output_dir,
-            f"plot_train_loss_{train_cfg.model_name}-{timestamp}.png",
-        )
-        fig.tight_layout()
-        fig.savefig(train_plot, dpi=160)
-        plt.close(fig)
-        plot_paths.append(train_plot)
+    n_rows = max(1, len(rows))
+    fig_height = min(0.42 * n_rows + 1.2, 18)
+    fig, ax = plt.subplots(figsize=(10.5, fig_height))
+    ax.axis("off")
+    table = ax.table(
+        cellText=rows,
+        colLabels=["epoch"] + columns,
+        loc="center",
+        cellLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.25)
 
-    eval_by_epoch = history.get("eval_by_epoch", [])
-    if eval_by_epoch:
-        epochs = [item["epoch"] for item in eval_by_epoch]
-        eval_loss = [item["eval_loss"] for item in eval_by_epoch]
-        eval_acc = [item["eval_accuracy"] for item in eval_by_epoch]
-        eval_f1 = [item["eval_macro_f1"] for item in eval_by_epoch]
+    out_dir = os.path.dirname(metrics_path)
+    out_path = os.path.join(out_dir, "distributional_distances_summary.png")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
 
-        fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-        axes[0].plot(epochs, eval_loss, marker="o")
-        axes[0].set_ylabel("Eval Loss")
-        axes[0].grid(True, alpha=0.3)
 
-        axes[1].plot(epochs, eval_acc, marker="o")
-        axes[1].set_ylabel("Eval Accuracy")
-        axes[1].grid(True, alpha=0.3)
+def _compute_distributional_distances(labels, pred_label_counts, target_label_counts):
+    """Compute cheap CPU-only distributional distance metrics between
+    the predicted and ground-truth label count distributions.
 
-        axes[2].plot(epochs, eval_f1, marker="o")
-        axes[2].set_ylabel("Eval Macro-F1")
-        axes[2].set_xlabel("Epoch")
-        axes[2].grid(True, alpha=0.3)
+    Returns a dict with:
+      kl_divergence     – KL(target ‖ pred), nats; how surprising pred is under target
+      cosine_similarity – cosine similarity of count vectors (1.0 = identical shape)
+      total_variation   – TV distance in [0, 1]; 0 = identical distributions
+      wasserstein_1     – Wasserstein-1 using label index as position (or None if scipy absent)
+    """
+    import numpy as np
 
-        eval_plot = os.path.join(
-            train_cfg.output_dir,
-            f"plot_eval_epoch_metrics_{train_cfg.model_name}-{timestamp}.png",
-        )
-        fig.tight_layout()
-        fig.savefig(eval_plot, dpi=160)
-        plt.close(fig)
-        plot_paths.append(eval_plot)
+    n = len(labels)
+    pred_vec = np.array([pred_label_counts.get(str(l), 0) for l in labels], dtype=float)
+    tgt_vec = np.array([target_label_counts.get(str(l), 0) for l in labels], dtype=float)
 
-    eval_by_step = history.get("eval_by_step", [])
-    if eval_by_step:
-        steps = [item["global_step"] for item in eval_by_step]
-        eval_f1 = [item["eval_macro_f1"] for item in eval_by_step]
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(steps, eval_f1, marker="o")
-        ax.set_title("Eval Macro-F1 by Validation Step")
-        ax.set_xlabel("Global Step")
-        ax.set_ylabel("Eval Macro-F1")
-        ax.grid(True, alpha=0.3)
-        step_plot = os.path.join(
-            train_cfg.output_dir,
-            f"plot_eval_f1_steps_{train_cfg.model_name}-{timestamp}.png",
-        )
-        fig.tight_layout()
-        fig.savefig(step_plot, dpi=160)
-        plt.close(fig)
-        plot_paths.append(step_plot)
+    pred_sum = pred_vec.sum()
+    tgt_sum = tgt_vec.sum()
+    pred_p = pred_vec / pred_sum if pred_sum > 0 else np.ones(n, dtype=float) / n
+    tgt_p = tgt_vec / tgt_sum if tgt_sum > 0 else np.ones(n, dtype=float) / n
 
-    return metrics_path, plot_paths
+    eps = 1e-10
+    kl = float(np.sum(tgt_p * np.log((tgt_p + eps) / (pred_p + eps))))
+
+    pred_norm = np.linalg.norm(pred_p)
+    tgt_norm = np.linalg.norm(tgt_p)
+    cos_sim = float(np.dot(pred_p, tgt_p) / (pred_norm * tgt_norm + eps))
+
+    tv = float(np.sum(np.abs(pred_p - tgt_p)) / 2.0)
+
+    w1 = None
+    try:
+        from scipy.stats import wasserstein_distance as _wd
+        positions = list(range(n))
+        w1 = float(_wd(positions, positions, tgt_p, pred_p))
+    except Exception:
+        pass
+
+    result = {
+        "kl_divergence": kl,
+        "cosine_similarity": cos_sim,
+        "total_variation": tv,
+    }
+    if w1 is not None:
+        result["wasserstein_1"] = w1
+    return result
+
+
+def _append_epoch_record_to_disk(output_dir, model_name, record):
+    """Append a single epoch evaluation record as one JSON line to a JSONL file.
+
+    This is crash-safe: each epoch's data is flushed immediately after it
+    is computed, so a mid-run crash does not lose earlier epochs.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    jsonl_path = os.path.join(output_dir, f"epoch_records_{model_name}.jsonl")
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return jsonl_path
 
 
 def evaluate_classification(model, dataloader, device):
@@ -430,13 +549,30 @@ def evaluate_classification(model, dataloader, device):
     for idx, label in enumerate(labels):
         row_total = int(conf[idx].sum())
         class_acc = float(conf[idx, idx] / row_total) if row_total > 0 else 0.0
+        tp = int(conf[idx, idx])
+        fp = int(conf[:, idx].sum()) - tp
+        fn = int(conf[idx, :].sum()) - tp
+        tn = int(conf.sum()) - tp - fp - fn
         per_class_metrics[str(label)] = {
             "accuracy": class_acc,
             "precision": float(precision[idx]),
             "recall": float(recall[idx]),
             "f1": float(f1[idx]),
             "support": int(support[idx]),
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "tn": tn,
         }
+
+    pred_label_counts = {str(label): 0 for label in labels}
+    target_label_counts = {str(label): 0 for label in labels}
+    for p in all_preds:
+        pred_label_counts[str(p)] = pred_label_counts.get(str(p), 0) + 1
+    for t in all_targets:
+        target_label_counts[str(t)] = target_label_counts.get(str(t), 0) + 1
+
+    dist_metrics = _compute_distributional_distances(labels, pred_label_counts, target_label_counts)
 
     return {
         "eval_loss": eval_loss,
@@ -447,6 +583,9 @@ def evaluate_classification(model, dataloader, device):
         "labels": [int(x) for x in labels],
         "predictions": [int(x) for x in all_preds],
         "targets": [int(x) for x in all_targets],
+        "pred_label_counts": pred_label_counts,
+        "target_label_counts": target_label_counts,
+        "distributional_distances": dist_metrics,
     }
 
 
@@ -561,28 +700,6 @@ def train_classification(
                 wandb_payload.update(per_class_wandb)
                 _wandb_log(wandb_run, wandb_payload, step=global_step)
 
-                if wandb_run is not None:
-                    try:
-                        import wandb
-
-                        _wandb_log(
-                            wandb_run,
-                            {
-                                "eval/confusion_matrix_step": wandb.plot.confusion_matrix(
-                                    probs=None,
-                                    y_true=metrics["targets"],
-                                    preds=metrics["predictions"],
-                                    class_names=class_names,
-                                )
-                            },
-                            step=global_step,
-                        )
-                    except Exception as exc:
-                        print(
-                            "WARNING: Failed to log step confusion matrix to wandb. "
-                            f"Error: {exc}"
-                        )
-
                 if metrics["eval_macro_f1"] > best_macro_f1:
                     best_macro_f1 = metrics["eval_macro_f1"]
                     best_metrics = metrics
@@ -673,19 +790,43 @@ def train_classification(
                 per_class_wandb[f"eval/class_f1_epoch/{safe_name}"] = float(
                     class_metric["f1"]
                 )
+                per_class_wandb[f"eval/class_tp_epoch/{safe_name}"] = int(class_metric["tp"])
+                per_class_wandb[f"eval/class_fp_epoch/{safe_name}"] = int(class_metric["fp"])
+                per_class_wandb[f"eval/class_fn_epoch/{safe_name}"] = int(class_metric["fn"])
+                per_class_wandb[f"eval/class_tn_epoch/{safe_name}"] = int(class_metric["tn"])
 
-            history["eval_by_epoch"].append(
-                {
-                    "epoch": int(epoch),
-                    "global_step": int(global_step),
-                    "eval_loss": float(metrics["eval_loss"]),
-                    "eval_accuracy": float(metrics["eval_accuracy"]),
-                    "eval_macro_f1": float(metrics["eval_macro_f1"]),
-                    "per_class_metrics": metrics["per_class_metrics"],
-                    "confusion_matrix": metrics["confusion_matrix"],
-                    "labels": metrics["labels"],
-                }
-            )
+            dist = metrics.get("distributional_distances", {})
+            epoch_record = {
+                "epoch": int(epoch),
+                "global_step": int(global_step),
+                "eval_loss": float(metrics["eval_loss"]),
+                "eval_accuracy": float(metrics["eval_accuracy"]),
+                "eval_macro_f1": float(metrics["eval_macro_f1"]),
+                "per_class_metrics": metrics["per_class_metrics"],
+                "confusion_matrix": metrics["confusion_matrix"],
+                "labels": metrics["labels"],
+                "pred_label_counts": metrics.get("pred_label_counts", {}),
+                "target_label_counts": metrics.get("target_label_counts", {}),
+                "distributional_distances": dist,
+            }
+            history["eval_by_epoch"].append(epoch_record)
+            if bool(train_cfg.save_metrics):
+                jsonl_path = _append_epoch_record_to_disk(
+                    train_cfg.output_dir, train_cfg.model_name, epoch_record
+                )
+                print(f"Appended epoch {epoch} record to {jsonl_path}")
+
+            dist_wandb = {}
+            if dist:
+                if "kl_divergence" in dist:
+                    dist_wandb["eval/dist_kl_epoch"] = float(dist["kl_divergence"])
+                if "cosine_similarity" in dist:
+                    dist_wandb["eval/dist_cosine_epoch"] = float(dist["cosine_similarity"])
+                if "total_variation" in dist:
+                    dist_wandb["eval/dist_tv_epoch"] = float(dist["total_variation"])
+                if "wasserstein_1" in dist:
+                    dist_wandb["eval/dist_wasserstein1_epoch"] = float(dist["wasserstein_1"])
+
             wandb_payload = {
                 "eval/loss_epoch": float(metrics["eval_loss"]),
                 "eval/accuracy_epoch": float(metrics["eval_accuracy"]),
@@ -693,29 +834,9 @@ def train_classification(
                 "train/epoch": int(epoch),
             }
             wandb_payload.update(per_class_wandb)
+            wandb_payload.update(dist_wandb)
             _wandb_log(wandb_run, wandb_payload, step=global_step)
 
-            if wandb_run is not None:
-                try:
-                    import wandb
-
-                    _wandb_log(
-                        wandb_run,
-                        {
-                            "eval/confusion_matrix_epoch": wandb.plot.confusion_matrix(
-                                probs=None,
-                                y_true=metrics["targets"],
-                                preds=metrics["predictions"],
-                                class_names=class_names,
-                            )
-                        },
-                        step=global_step,
-                    )
-                except Exception as exc:
-                    print(
-                        "WARNING: Failed to log epoch confusion matrix to wandb. "
-                        f"Error: {exc}"
-                    )
             if metrics["eval_macro_f1"] > best_macro_f1:
                 best_macro_f1 = metrics["eval_macro_f1"]
                 best_metrics = metrics
@@ -784,12 +905,18 @@ def main(**kwargs):
         torch.xpu.manual_seed(train_cfg.seed)
 
     model_config_path = makam_cfg.model_config_path
+    explicit_model_config = bool(kwargs.get("model_config_path"))
     ckpt_path = train_cfg.trained_checkpoint_path
     ckpt_model_config_path = _find_microtonal_llama_config(ckpt_path)
-    if ckpt_model_config_path is not None:
+    if ckpt_model_config_path is not None and not explicit_model_config:
         model_config_path = ckpt_model_config_path
         print(
             f"Using checkpoint-side model config for compatibility: {model_config_path}"
+        )
+    elif ckpt_model_config_path is not None and explicit_model_config:
+        print(
+            "Explicit --model_config_path provided; skipping checkpoint-side config override. "
+            f"Using: {model_config_path}"
         )
 
     model_config = LlamaConfig.from_pretrained(model_config_path)
@@ -925,6 +1052,15 @@ def main(**kwargs):
         print(f"Saved metrics JSON to {metrics_path}")
     if plot_paths:
         print(f"Saved metric plots to: {plot_paths}")
+
+    if metrics_path is not None:
+        confusion_paths = _save_confusion_matrices_from_metrics_json(metrics_path)
+        if confusion_paths:
+            print(f"Saved epoch confusion matrices to: {confusion_paths}")
+
+        dist_table_path = _save_distributional_distance_table_from_metrics_json(metrics_path)
+        if dist_table_path is not None:
+            print(f"Saved distribution summary table to: {dist_table_path}")
 
     if wandb_run is not None:
         summary_payload = {

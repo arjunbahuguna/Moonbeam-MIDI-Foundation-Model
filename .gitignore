@@ -53,3 +53,14 @@ data/
 .venv/
 .idea/
 output_folder/
+
+
+*.err
+*.out
+data_eval/*
+data_eval/symbtr4eval/makam_label_map.json
+data_eval/symbtr4eval/train_test_split.json
+data_eval/symbtr4eval/failed_midi_files.log
+data_eval/symbtr4eval/failed_midi_files.log
+data_eval/symbtr4eval/makam_label_map.json
+data_eval/symbtr4eval/train_test_split.csv

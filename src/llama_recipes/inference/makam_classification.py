@@ -88,7 +88,7 @@ def _aggregate_logits(window_logits: torch.Tensor, method: str) -> torch.Tensor:
 def main(
     checkpoint_path: str,
     npy_path: str,
-    model_config_path: str = "src/llama_recipes/configs/config_micro/model_config_microtonal.json",
+    model_config_path: str = "src/llama_recipes/configs/model_config_small_microtonal.json",
     label_map_path: str = "data_eval/symbtr4eval/makam_label_map.json",
     seq_len: int = 1200,
     window_stride: int = 600,
